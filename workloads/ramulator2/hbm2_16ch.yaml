@@ -1,0 +1,33 @@
+Frontend:
+  # Use Ramulator2's external wrapper frontend so requests can be injected via
+  # IFrontEnd::receive_external_requests() from accel-sim.
+  impl: GEM5
+  clock_ratio: 1
+
+MemorySystem:
+  impl: GenericDRAM
+  clock_ratio: 1
+
+  DRAM:
+    impl: HBM2
+    org:
+      preset: HBM2_8Gb
+      # Match accel-sim's default RTX3070 config (-gpgpu_n_mem 16).
+      channel: 16
+    timing:
+      preset: HBM2_2Gbps
+
+  Controller:
+    impl: Generic
+    Scheduler:
+      impl: FRFCFS
+    RefreshManager:
+      impl: AllBank
+    RowPolicy:
+      # ClosedRowPolicy assumes a "rank" level and a "close-row" request, which
+      # are not part of the HBM2 spec in Ramulator2. Use OpenRowPolicy instead.
+      impl: OpenRowPolicy
+    plugins:
+
+  AddrMapper:
+    impl: RoBaRaCoCh
