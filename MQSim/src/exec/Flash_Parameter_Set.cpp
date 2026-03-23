@@ -1,26 +1,122 @@
 #include <algorithm>
+#include <cstddef>
 #include <string.h>
+#include <stdexcept>
 #include "../sim/Engine.h"
 #include "Flash_Parameter_Set.h"
+#include "../ssd/SSD_Defs.h"
+
+// 初始化多参数集map
+std::map<Flash_Technology_Type, Flash_Parameter_Set::Flash_Params> Flash_Parameter_Set::Flash_Parameter_Sets;
+Flash_Parameter_Set::Flash_Params* Flash_Parameter_Set::current_params = nullptr;
+bool Channel_Chip_Technology_Type[64] = {};	//	0为SLC	1为MLC
 
 Flash_Technology_Type Flash_Parameter_Set::Flash_Technology = Flash_Technology_Type::MLC;
 NVM::FlashMemory::Command_Suspension_Mode Flash_Parameter_Set::CMD_Suspension_Support = NVM::FlashMemory::Command_Suspension_Mode::ERASE;
-sim_time_type Flash_Parameter_Set::Page_Read_Latency_LSB = 75000;
-sim_time_type Flash_Parameter_Set::Page_Read_Latency_CSB = 75000;
-sim_time_type Flash_Parameter_Set::Page_Read_Latency_MSB = 75000;
-sim_time_type Flash_Parameter_Set::Page_Program_Latency_LSB = 750000;
-sim_time_type Flash_Parameter_Set::Page_Program_Latency_CSB = 750000;
-sim_time_type Flash_Parameter_Set::Page_Program_Latency_MSB = 750000;
-sim_time_type Flash_Parameter_Set::Block_Erase_Latency = 3800000;//Block erase latency in nano-seconds
+sim_time_type Flash_Parameter_Set::Page_Read_Latency_LSB = 75000 * SIM_TIME_TICK_PER_NANOSECOND;
+sim_time_type Flash_Parameter_Set::Page_Read_Latency_CSB = 75000 * SIM_TIME_TICK_PER_NANOSECOND;
+sim_time_type Flash_Parameter_Set::Page_Read_Latency_MSB = 75000 * SIM_TIME_TICK_PER_NANOSECOND;
+sim_time_type Flash_Parameter_Set::Page_Program_Latency_LSB = 750000 * SIM_TIME_TICK_PER_NANOSECOND;
+sim_time_type Flash_Parameter_Set::Page_Program_Latency_CSB = 750000 * SIM_TIME_TICK_PER_NANOSECOND;
+sim_time_type Flash_Parameter_Set::Page_Program_Latency_MSB = 750000 * SIM_TIME_TICK_PER_NANOSECOND;
+sim_time_type Flash_Parameter_Set::Block_Erase_Latency = 3800000 * SIM_TIME_TICK_PER_NANOSECOND;//Block erase latency in nano-seconds
 unsigned int Flash_Parameter_Set::Block_PE_Cycles_Limit = 10000;
-sim_time_type Flash_Parameter_Set::Suspend_Erase_Time = 700000;//in nano-seconds
-sim_time_type Flash_Parameter_Set::Suspend_Program_Time = 100000;//in nano-seconds
+sim_time_type Flash_Parameter_Set::Suspend_Erase_Time = 700000 * SIM_TIME_TICK_PER_NANOSECOND;//in nano-seconds
+sim_time_type Flash_Parameter_Set::Suspend_Program_Time = 100000 * SIM_TIME_TICK_PER_NANOSECOND;//in nano-seconds
 unsigned int Flash_Parameter_Set::Die_No_Per_Chip = 2;
 unsigned int Flash_Parameter_Set::Plane_No_Per_Die = 2;
 unsigned int Flash_Parameter_Set::Block_No_Per_Plane = 2048;
 unsigned int Flash_Parameter_Set::Page_No_Per_Block = 256;//Page no per block
 unsigned int Flash_Parameter_Set::Page_Capacity = 8192;//Flash page capacity in bytes
 unsigned int Flash_Parameter_Set::Page_Metadat_Capacity = 1872;//Flash page capacity in bytes
+
+double Flash_Parameter_Set::SLC_MLC_Ratio = 1; // add ed
+uint64_t Flash_Parameter_Set::lpn_count_on_SLC = 0;
+
+const Flash_Parameter_Set::Flash_Params& Flash_Parameter_Set::Get_Parameters(Flash_Technology_Type tech_type){
+	auto it = Flash_Parameter_Set::Flash_Parameter_Sets.find(tech_type);
+        if (it != Flash_Parameter_Set::Flash_Parameter_Sets.end()) {
+			Flash_Parameter_Set::current_params = &(it->second);
+            return *Flash_Parameter_Set::current_params;
+        }
+        // 如果找不到参数，抛出异常或返回默认值
+        throw std::runtime_error("Flash parameter set not found for technology type");
+}
+
+Flash_Technology_Type Flash_Parameter_Set::Select_Technology_By_Address(int Channel_count, int channel_cntr, int chip_cntr)
+{
+	//return Flash_Technology_Type::SLC;
+	//return Flash_Technology_Type::MLC;
+	if(SLC_MLC_Ratio > 1)
+	{
+		if(!Channel_Chip_Technology_Type[ channel_cntr * 8 + chip_cntr * 2])	//查表获得当前颗粒类型
+			return Flash_Technology_Type::SLC;
+		else return Flash_Technology_Type::MLC;
+	
+	}
+	else {
+		// int SLC_num = SLC_MLC_Ratio * Chip_no_per_channel;
+		// //int MLC_num = Chip_no_per_channel - SLC_num;
+		
+		// if(	chip_cntr + 1 > SLC_num)	
+		// return Flash_Technology_Type::MLC;
+		// else return Flash_Technology_Type::SLC;
+		int SLC_num = SLC_MLC_Ratio * Channel_count;//获得分界线 channel_cntr
+		int MLC_num = Channel_count - SLC_num;
+		
+		if(	channel_cntr + 1 > SLC_num)	
+		return Flash_Technology_Type::MLC;
+		else return Flash_Technology_Type::SLC;
+	}
+	
+}
+
+
+// int Flash_Parameter_Set::Page_Params_dif_tech(int Channel_count, int channel_cntr, int chip_cntr){
+// 	Flash_Technology_Type selected_tech = Select_Technology_By_Address(Channel_count, channel_cntr, chip_cntr);	//added
+	
+// 	const Flash_Parameter_Set::Flash_Params& tech_params = Flash_Parameter_Set::Get_Parameters(selected_tech);
+// 	return tech_params.Page_No_Per_Block;
+
+// }
+
+unsigned int Flash_Parameter_Set::Get_sector_num_per_page(Flash_Technology_Type tech_type)
+{
+	const auto& params = Flash_Parameter_Set::Get_Parameters(tech_type);
+	if (params.Page_Capacity % SECTOR_SIZE_IN_BYTE != 0) {
+		throw std::runtime_error("Page_Capacity must be a multiple of SECTOR_SIZE_IN_BYTE");
+	}
+	return params.Page_Capacity / SECTOR_SIZE_IN_BYTE;
+}
+
+unsigned int Flash_Parameter_Set::Get_sector_num_by_Address(unsigned int Channel_count, int channel_cntr, int chip_cntr)
+{
+	const Flash_Technology_Type tech = Flash_Parameter_Set::Select_Technology_By_Address((int)Channel_count, channel_cntr, chip_cntr);
+	return Flash_Parameter_Set::Get_sector_num_per_page(tech);
+}
+
+unsigned int Flash_Parameter_Set::Get_Max_sector_num_per_page()
+{
+	unsigned int max_sectors = 0;
+	for (const auto& pair : Flash_Parameter_Set::Flash_Parameter_Sets) {
+		const auto& params = pair.second;
+		if (params.Page_Capacity % SECTOR_SIZE_IN_BYTE != 0) {
+			throw std::runtime_error("Page_Capacity must be a multiple of SECTOR_SIZE_IN_BYTE");
+		}
+		const unsigned int sector_num = params.Page_Capacity / SECTOR_SIZE_IN_BYTE;
+		if (sector_num > max_sectors) max_sectors = sector_num;
+	}
+
+	// Fallback to legacy single-parameter static value (single-parameter mode)
+	if (max_sectors == 0) {
+		if (Flash_Parameter_Set::Page_Capacity % SECTOR_SIZE_IN_BYTE != 0) {
+			throw std::runtime_error("Page_Capacity must be a multiple of SECTOR_SIZE_IN_BYTE");
+		}
+		max_sectors = Flash_Parameter_Set::Page_Capacity / SECTOR_SIZE_IN_BYTE;
+	}
+
+	return max_sectors;
+}
 
 void Flash_Parameter_Set::XML_serialize(Utils::XmlWriter& xmlwriter)
 {
@@ -131,8 +227,112 @@ void Flash_Parameter_Set::XML_serialize(Utils::XmlWriter& xmlwriter)
 	xmlwriter.Write_close_tag();
 }
 
-void Flash_Parameter_Set::XML_deserialize(rapidxml::xml_node<> *node)
+void Flash_Parameter_Set::XML_deserialize(rapidxml::xml_node<> *parent_node)
 {
+	try {
+		// 调试：打印父节点名称，确认是否正确
+		std::cout << "Parent node name: " << parent_node->name() << std::endl;
+		// 调试：检查是否有任何子节点
+		if (!parent_node->first_node()) {
+			std::cout << "No child nodes found under parent node!" << std::endl;
+		} else {
+			// 调试：打印所有子节点名称
+			for (auto node = parent_node->first_node(); node; node = node->next_sibling()) {
+				std::cout << "Child node: " << node->name() << std::endl;
+			}
+		}
+
+		for (auto set_node = parent_node->first_node("Flash_Parameter_Set"); set_node; set_node = set_node->next_sibling("Flash_Parameter_Set"))
+		{
+			Flash_Params params;
+			for (auto param = set_node->first_node(); param; param = param->next_sibling()) {
+				if (strcmp(param->name(), "Flash_Technology") == 0) {
+					std::string val = param->value();
+					std::transform(val.begin(), val.end(), val.begin(), ::toupper);
+					if (strcmp(val.c_str(), "SLC") == 0)
+						params.Flash_Technology = Flash_Technology_Type::SLC;
+					else if (strcmp(val.c_str(), "MLC") == 0)
+						params.Flash_Technology = Flash_Technology_Type::MLC;
+					else if (strcmp(val.c_str(), "TLC") == 0)
+						params.Flash_Technology = Flash_Technology_Type::TLC;
+					else PRINT_ERROR("Unknown flash technology type specified in the input file")
+				} else if (strcmp(param->name(), "CMD_Suspension_Support") == 0) {
+					std::string val = param->value();
+					std::transform(val.begin(), val.end(), val.begin(), ::toupper);
+					if (strcmp(val.c_str(), "NONE") == 0) {
+						params.CMD_Suspension_Support = NVM::FlashMemory::Command_Suspension_Mode::NONE;
+					} else if (strcmp(val.c_str(), "ERASE") == 0) {
+						params.CMD_Suspension_Support = NVM::FlashMemory::Command_Suspension_Mode::ERASE;
+					} else if (strcmp(val.c_str(), "PROGRAM") == 0) {
+						params.CMD_Suspension_Support = NVM::FlashMemory::Command_Suspension_Mode::PROGRAM;
+					} else if (strcmp(val.c_str(), "PROGRAM_ERASE") == 0) {
+						params.CMD_Suspension_Support = NVM::FlashMemory::Command_Suspension_Mode::PROGRAM_ERASE;
+					} else {
+						PRINT_ERROR("Unknown command suspension type specified in the input file")
+					}
+				} else if (strcmp(param->name(), "Page_Read_Latency_LSB") == 0) {
+					std::string val = param->value();
+					params.Page_Read_Latency_LSB = std::stoull(val) * SIM_TIME_TICK_PER_NANOSECOND;
+				} else if (strcmp(param->name(), "Page_Read_Latency_CSB") == 0) {
+					std::string val = param->value();
+					params.Page_Read_Latency_CSB = std::stoull(val) * SIM_TIME_TICK_PER_NANOSECOND;
+				} else if (strcmp(param->name(), "Page_Read_Latency_MSB") == 0) {
+					std::string val = param->value();
+					params.Page_Read_Latency_MSB = std::stoull(val) * SIM_TIME_TICK_PER_NANOSECOND;
+				} else if (strcmp(param->name(), "Page_Program_Latency_LSB") == 0) {
+					std::string val = param->value();
+					params.Page_Program_Latency_LSB = std::stoull(val) * SIM_TIME_TICK_PER_NANOSECOND;
+				} else if (strcmp(param->name(), "Page_Program_Latency_CSB") == 0) {
+					std::string val = param->value();
+					params.Page_Program_Latency_CSB = std::stoull(val) * SIM_TIME_TICK_PER_NANOSECOND;
+				} else if (strcmp(param->name(), "Page_Program_Latency_MSB") == 0) {
+					std::string val = param->value();
+					params.Page_Program_Latency_MSB = std::stoull(val) * SIM_TIME_TICK_PER_NANOSECOND;
+				} else if (strcmp(param->name(), "Block_Erase_Latency") == 0) {
+					std::string val = param->value();
+					params.Block_Erase_Latency = std::stoull(val) * SIM_TIME_TICK_PER_NANOSECOND;
+				} else if (strcmp(param->name(), "Block_PE_Cycles_Limit") == 0) {
+					std::string val = param->value();
+					params.Block_PE_Cycles_Limit = std::stoul(val);
+				} else if (strcmp(param->name(), "Suspend_Erase_Time") == 0) {
+					std::string val = param->value();
+					params.Suspend_Erase_Time = std::stoull(val) * SIM_TIME_TICK_PER_NANOSECOND;
+				} else if (strcmp(param->name(), "Suspend_Program_Time") == 0) {
+					std::string val = param->value();
+					params.Suspend_Program_Time = std::stoull(val) * SIM_TIME_TICK_PER_NANOSECOND;
+				} else if (strcmp(param->name(), "Die_No_Per_Chip") == 0) {
+					std::string val = param->value();
+					params.Die_No_Per_Chip = std::stoul(val);
+				} else if (strcmp(param->name(), "Plane_No_Per_Die") == 0) {
+					std::string val = param->value();
+					params.Plane_No_Per_Die = std::stoul(val);
+				} else if (strcmp(param->name(), "Block_No_Per_Plane") == 0) {
+					std::string val = param->value();
+					params.Block_No_Per_Plane = std::stoul(val);
+				} else if (strcmp(param->name(), "Page_No_Per_Block") == 0) {
+					std::string val = param->value();
+					params.Page_No_Per_Block = std::stoul(val);
+				} else if (strcmp(param->name(), "Page_Capacity") == 0) {
+					std::string val = param->value();
+					params.Page_Capacity = std::stoul(val);
+				} else if (strcmp(param->name(), "Page_Metadat_Capacity") == 0) {
+					std::string val = param->value();
+					params.Page_Metadat_Capacity = std::stoul(val);
+				}
+			}
+			Flash_Parameter_Sets[params.Flash_Technology] = params;
+			
+		} 
+		
+		select_configuration(Flash_Technology_Type::MLC);
+		}
+		catch (...) {
+			PRINT_ERROR("Error in the Flash_Parameter_Set!")
+		}
+
+}
+
+void Flash_Parameter_Set::XML_deserialize_single(rapidxml::xml_node<> *node){
 	try {
 		for (auto param = node->first_node(); param; param = param->next_sibling()) {
 			if (strcmp(param->name(), "Flash_Technology") == 0) {

@@ -13,7 +13,16 @@ typedef sim_time_type data_timestamp_type;
 #define T0 0
 #define INVALID_TIME_STAMP 18446744073709551615ULL
 #define MAXIMUM_TIME 18446744073709551615ULL
-#define ONE_SECOND 1000000000
+//#define ONE_SECOND 1000000000'000
+#define SIM_TIME_TICK_PER_NANOSECOND 1000ULL  // 1 ns = 1000ps
+#define SIMBASETIMEConv SIM_TIME_TICK_PER_NANOSECOND
+#define SECTOR_SIZE_IN_BYTE 512
+
+
+// 统一用缩放后的系数
+#define ONE_SECOND (1000000000ULL * SIM_TIME_TICK_PER_NANOSECOND)
+#define SIM_TIME_TO_MICROSECONDS_COEFF (1000ULL * SIM_TIME_TICK_PER_NANOSECOND)
+#define SIM_TIME_TO_SECONDS_COEFF (1000000000ULL * SIM_TIME_TICK_PER_NANOSECOND)
 typedef std::string sim_object_id_type;
 
 #define CurrentTimeStamp Simulator->Time()
@@ -26,6 +35,6 @@ typedef std::string sim_object_id_type;
 #define PRINT_MESSAGE(M) std::cout << M << std::endl;
 #define DEBUG(M) //std::cout<<M<<std::endl;
 #define DEBUG2(M) //std::cout<<M<<std::endl;
-#define SIM_TIME_TO_MICROSECONDS_COEFF 1000
-#define SIM_TIME_TO_SECONDS_COEFF 1000000000
+// #define SIM_TIME_TO_MICROSECONDS_COEFF 1000
+// #define SIM_TIME_TO_SECONDS_COEFF 1000000000
 #endif // !DEFINITIONS_H

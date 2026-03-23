@@ -5,9 +5,21 @@
 #include "Address_Mapping_Unit_Page_Level.h"
 #include "Stats.h"
 #include "../utils/Logical_Address_Partitioning_Unit.h"
+#include "../exec/Flash_Parameter_Set.h"
+#define DEBUG1 true
 
 namespace SSD_Components
 {
+	static inline page_status_type full_bitmap_for_sectors(unsigned int sectors_per_page)	//added
+	{
+		// Avoid undefined behavior for (1ULL << 64)
+		return sectors_per_page >= 64 ? FULL_PROGRAMMED_PAGE : (page_status_type)(((page_status_type)1ULL << sectors_per_page) - 1ULL);
+	}
+
+	static inline unsigned int sectors_per_page_for_address(unsigned int channel_count, const NVM::FlashMemory::Physical_Page_Address& addr)
+	{
+		return Flash_Parameter_Set::Get_sector_num_by_Address(channel_count, (int)addr.ChannelID, (int)addr.ChipID);
+	}
 	Cached_Mapping_Table::Cached_Mapping_Table(unsigned int capacity) : capacity(capacity)
 	{
 	}
@@ -324,9 +336,9 @@ namespace SSD_Components
 			*  is calculated at this level and then pass it to the constructors of mapping domains
 			* entry size = sizeOf(lpa) + sizeOf(ppn) + sizeOf(bit vector that shows written sectors of a page)
 			*/
-			CMT_entry_size = (unsigned int)std::ceil(((2 * std::log2(total_physical_pages_no)) + sector_no_per_page) / 8);
+			CMT_entry_size = (unsigned int)std::ceil(((2 * std::log2(total_physical_pages_no)) + Flash_Parameter_Set::Get_Max_sector_num_per_page()) / 8);	//修改sector_no_per_page替换为最大值
 			//In GTD we do not need to store lpa
-			GTD_entry_size = (unsigned int)std::ceil((std::log2(total_physical_pages_no) + sector_no_per_page) / 8);
+			GTD_entry_size = (unsigned int)std::ceil((std::log2(total_physical_pages_no) + Flash_Parameter_Set::Get_Max_sector_num_per_page()) / 8);	//+1
 			no_of_translation_entries_per_page = (SectorsPerPage * SECTOR_SIZE_IN_BYTE) / GTD_entry_size;
 
 			Cached_Mapping_Table* sharedCMT = NULL;
@@ -385,7 +397,7 @@ namespace SSD_Components
 				channel_ids, (unsigned int)(stream_channel_ids[domainID].size()), chip_ids, (unsigned int)(stream_chip_ids[domainID].size()), die_ids, 
 				(unsigned int)(stream_die_ids[domainID].size()), plane_ids, (unsigned int)(stream_plane_ids[domainID].size()),
 				Utils::Logical_Address_Partitioning_Unit::PDA_count_allocate_to_flow(domainID), Utils::Logical_Address_Partitioning_Unit::LHA_count_allocate_to_flow_from_device_view(domainID),
-				sector_no_per_page);
+				Flash_Parameter_Set::Get_Max_sector_num_per_page());	//+2
 			delete[] channel_ids;
 			delete[] chip_ids;
 			delete[] die_ids;
@@ -621,22 +633,23 @@ namespace SSD_Components
 				}
 			}
 		}
+		//通过嵌套循环创建了一个四维数组 assigned_lpas，层级对应：通道(Channel) -> 芯片(Chip) -> Die -> 平面(Plane),	用于暂存分配到每个 Plane 的 LPA 列表。
 
 		//First: distribute LPAs to planes
 		NVM::FlashMemory::Physical_Page_Address plane_address;
-		for (auto lpa = lpa_list.begin(); lpa != lpa_list.end();) {
-			if ((*lpa).first >= domains[stream_id]->Total_logical_pages_no) {
+		for (auto lpa = lpa_list.begin(); lpa != lpa_list.end();) {	//遍历 lpa_list
+			if ((*lpa).first >= domains[stream_id]->Total_logical_pages_no) {	//首先校验 LPA 是否越界：大于stream的总逻辑页数
 				PRINT_ERROR("Out of range LPA specified for preconditioning! LPA shoud be smaller than " << domains[stream_id]->Total_logical_pages_no << ", but it is " << (*lpa).first)
 			}
 			PPA_type ppa = domains[stream_id]->Get_ppa_for_preconditioning(stream_id, (*lpa).first);
 			if (ppa != NO_LPA) {
 				PRINT_ERROR("Calling address allocation for a previously allocated LPA during preconditioning!")
 			}
-			allocate_plane_for_preconditioning(stream_id, (*lpa).first, plane_address);
+			allocate_plane_for_preconditioning(stream_id, (*lpa).first, plane_address);	//调用该函数确定该 LPA 应该属于哪个物理 Plane
 			if (LPA_type(Utils::Logical_Address_Partitioning_Unit::Get_share_of_physcial_pages_in_plane(plane_address.ChannelID, plane_address.ChipID, plane_address.DieID, plane_address.PlaneID) * page_no_per_plane)
 				> assigned_lpas[plane_address.ChannelID][plane_address.ChipID][plane_address.DieID][plane_address.PlaneID].size()) {
 				assigned_lpas[plane_address.ChannelID][plane_address.ChipID][plane_address.DieID][plane_address.PlaneID].push_back((*lpa).first);
-				lpa++;
+				lpa++;	//如果该 Plane 还没被填满（根据物理页共享比例计算），就将该 LPA 放入对应的四维数组容器assigned_lpas[channel] [chip] [die] [plane]中
 			} else {
 				lpa_list.erase(lpa++);
 			}
@@ -644,6 +657,7 @@ namespace SSD_Components
 
 		//Second: distribute LPAs within planes based on the steady-state status of blocks
 		//unsigned int safe_guard_band = ftl->GC_and_WL_Unit->Get_minimum_number_of_free_pages_before_GC();
+		//为了模拟真实使用后的 SSD（即块中既有有效页也有无效页），代码引入了 steady_state_distribution（稳态分布概率模型）
 		for (unsigned int channel_cntr = 0; channel_cntr < domains[stream_id]->Channel_no; channel_cntr++) {
 			for (unsigned int chip_cntr = 0; chip_cntr < domains[stream_id]->Chip_no; chip_cntr++) {
 				for (unsigned int die_cntr = 0; die_cntr < domains[stream_id]->Die_no; die_cntr++) {
@@ -653,10 +667,12 @@ namespace SSD_Components
 						plane_address.DieID = domains[stream_id]->Die_ids[die_cntr];
 						plane_address.PlaneID = domains[stream_id]->Plane_ids[plane_cntr];
 
+						//	获取预期将Consumption的物理块目标数量
 						unsigned int physical_block_consumption_goal = (unsigned int)(double(block_no_per_plane - ftl->GC_and_WL_Unit->Get_minimum_number_of_free_pages_before_GC() / 2)
 							* Utils::Logical_Address_Partitioning_Unit::Get_share_of_physcial_pages_in_plane(plane_address.ChannelID, plane_address.ChipID, plane_address.DieID, plane_address.PlaneID));
 
 						//Adjust the average
+						//计算当前已分配 LPA 的“真实平均值”与“模型平均值”的偏差，并据此平移概率分布曲线（adjusted_steady_state_distribution)
 						double model_average = 0;
 						std::vector<double> adjusted_steady_state_distribution;
 						//Check if probability distribution is correct 
@@ -672,7 +688,7 @@ namespace SSD_Components
 									adjusted_steady_state_distribution[i] = 0;
 								}
 								for (int i = displacement_index; i < int(pages_no_per_block); i++) {
-									adjusted_steady_state_distribution[i] = steady_state_distribution[i - displacement_index];
+									adjusted_steady_state_distribution[i] = steady_state_distribution[i - displacement_index];	//拟合曲线’ 修饰偏差值
 								}
 							} else {
 								displacement_index *= -1;
@@ -686,6 +702,7 @@ namespace SSD_Components
 						}
 
 						//Check if it is possible to find a PPA for each LPA with current proability assignments 
+						//物理有效页分配：根据调整后的分布，确定每个物理块（Block）中应该包含多少个有效页（valid_pages_in_block）
 						unsigned int total_valid_pages = 0;
 						for (int valid_pages_in_block = pages_no_per_block; valid_pages_in_block >= 0; valid_pages_in_block--) {
 							total_valid_pages += valid_pages_in_block * (unsigned int)(adjusted_steady_state_distribution[valid_pages_in_block] * physical_block_consumption_goal);
@@ -712,6 +729,7 @@ namespace SSD_Components
 
 							for (unsigned int block_cntr = 0; block_cntr < block_no_with_x_valid_page; block_cntr++) {
 								//Assign physical addresses
+								//调用 block_manager 分配物理页，并更新全局映射表 GlobalMappingTable，包括 PPA（物理页地址）和时间戳
 								std::vector<NVM::FlashMemory::Physical_Page_Address> addresses;
 								if (assigned_lpas[plane_address.ChannelID][plane_address.ChipID][plane_address.DieID][plane_address.PlaneID].size() < valid_pages_in_block) {
 									valid_pages_in_block = int(assigned_lpas[plane_address.ChannelID][plane_address.ChipID][plane_address.DieID][plane_address.PlaneID].size());
@@ -756,20 +774,22 @@ namespace SSD_Components
 
 	void Address_Mapping_Unit_Page_Level::Allocate_new_page_for_gc(NVM_Transaction_Flash_WR* transaction, bool is_translation_page)
 	{
-		if (is_translation_page) {
-			MPPN_type mppn = domains[transaction->Stream_id]->GlobalTranslationDirectory[transaction->LPA].MPPN;
+		//处理元数据页（is_translation_page 为 true）：
+		if (is_translation_page) {//如果移动的是映射表本身的数据（Translation Page），
+			MPPN_type mppn = domains[transaction->Stream_id]->GlobalTranslationDirectory[transaction->LPA].MPPN;//则从全局翻译映射表（GTD）中获取旧地址，并调用 allocate_page_in_plane_for_translation_write 分配新的物理位置。
 			if (mppn == NO_MPPN) {
 				PRINT_ERROR("Unexpected situation occured for gc write in Allocate_new_page_for_gc function!")
 			}
 
 			allocate_page_in_plane_for_translation_write(transaction, (MVPN_type)transaction->LPA, true);
 			transaction->Physical_address_determined = true;
-		} else {
+		} else {//处理用户数据页（is_translation_page 为 false）：
+			//CMT（映射缓存）检查：		检查 CMT 中是否已经缓存了该 LPA 的映射项。
 			if (!domains[transaction->Stream_id]->Mapping_entry_accessible(ideal_mapping_table, transaction->Stream_id, transaction->LPA)) {
-				if (!domains[transaction->Stream_id]->CMT->Check_free_slot_availability()) {
+				if (!domains[transaction->Stream_id]->CMT->Check_free_slot_availability()) {//如果没缓存且 CMT 已满，则触发置换逻辑（Eviction）：选择一个槽位踢出。
 					LPA_type evicted_lpa;
 					CMTSlotType evictedItem = domains[transaction->Stream_id]->CMT->Evict_one_slot(evicted_lpa);
-					if (evictedItem.Dirty) {
+					if (evictedItem.Dirty) {//如果被踢出的项是“脏”的（被修改过），
 						/* In order to eliminate possible race conditions for the requests that
 						* will access the evicted lpa in the near future (before the translation
 						* write finishes), MQSim updates GMT (the on flash mapping table) right
@@ -779,24 +799,25 @@ namespace SSD_Components
 						if (domains[transaction->Stream_id]->GlobalMappingTable[evicted_lpa].TimeStamp > CurrentTimeStamp) {
 							throw std::logic_error("Unexpected situation occured in handling GMT!");
 						}
-						domains[transaction->Stream_id]->GlobalMappingTable[evicted_lpa].TimeStamp = CurrentTimeStamp;
-						generate_flash_writeback_request_for_mapping_data(transaction->Stream_id, evicted_lpa);
+						domains[transaction->Stream_id]->GlobalMappingTable[evicted_lpa].TimeStamp = CurrentTimeStamp;//并更新全局映射表（GMT）以防后续访问发生竞态冲突。
+						generate_flash_writeback_request_for_mapping_data(transaction->Stream_id, evicted_lpa);//则调用 generate_flash_writeback_request_for_mapping_data 将其写回闪存，
 					}
 				}
 				domains[transaction->Stream_id]->CMT->Reserve_slot_for_lpn(transaction->Stream_id, transaction->LPA);
 				domains[transaction->Stream_id]->CMT->Insert_new_mapping_info(transaction->Stream_id, transaction->LPA, Convert_address_to_ppa(transaction->Address), transaction->write_sectors_bitmap);
 			}
 
-			allocate_page_in_plane_for_user_write(transaction, true);
+			allocate_page_in_plane_for_user_write(transaction, true);//分配物理页：调用 allocate_page_in_plane_for_user_write 获取新的物理页面。
 			transaction->Physical_address_determined = true;
 
 			//the mapping entry should be updated
+			//统计与更新：
 			stream_id_type stream_id = transaction->Stream_id;
-			Stats::total_CMT_queries++;
+			Stats::total_CMT_queries++;//增加 CMT 查询次数统计。
 			Stats::total_CMT_queries_per_stream[stream_id]++;
 
 			//either limited or unlimited mapping
-			if (domains[stream_id]->Mapping_entry_accessible(ideal_mapping_table, stream_id, transaction->LPA)) {
+			if (domains[stream_id]->Mapping_entry_accessible(ideal_mapping_table, stream_id, transaction->LPA)) {//如果是 理想映射表（Ideal Mapping） 或缓存命中，直接更新缓存信息。
 				Stats::CMT_hits++;
 				Stats::CMT_hits_per_stream[stream_id]++;
 				Stats::total_writeTR_CMT_queries++;
@@ -805,6 +826,7 @@ namespace SSD_Components
 				Stats::writeTR_CMT_hits_per_stream[stream_id]++;
 				domains[stream_id]->Update_mapping_info(ideal_mapping_table, stream_id, transaction->LPA, transaction->PPA, transaction->write_sectors_bitmap);
 			} else { //the else block only executed for non-ideal mapping table in which CMT has a limited capacity and mapping data is read/written from/to the flash storage
+				//	如果缓存未命中（仅限非理想模式），则在 CMT 中预留位置并插入新的映射信息。
 				if (!domains[stream_id]->CMT->Check_free_slot_availability()) {
 					LPA_type evicted_lpa;
 					CMTSlotType evictedItem = domains[stream_id]->CMT->Evict_one_slot(evicted_lpa);
@@ -832,6 +854,7 @@ namespace SSD_Components
 		AddressMappingDomain* domain = domains[stream_id];
 
 		switch (domain->PlaneAllocationScheme) {
+			case Flash_Plane_Allocation_Scheme_Type::IDEF:
 			case Flash_Plane_Allocation_Scheme_Type::CWDP:
 				targetAddress.ChannelID = domain->Channel_ids[(unsigned int)(lpn % domain->Channel_no)];
 				targetAddress.ChipID = domain->Chip_ids[(unsigned int)((lpn / domain->Channel_no) % domain->Chip_no)];
@@ -990,7 +1013,16 @@ namespace SSD_Components
 		NVM::FlashMemory::Physical_Page_Address& targetAddress = transaction->Address;
 		AddressMappingDomain* domain = domains[transaction->Stream_id];
 
-		switch (domain->PlaneAllocationScheme) {
+		switch (domain->PlaneAllocationScheme) { 
+			case Flash_Plane_Allocation_Scheme_Type::IDEF:
+				if(transaction->Stream_input_type == 0)
+				// if(lpn < Flash_Parameter_Set::lpn_count_on_SLC)
+					targetAddress.ChannelID = domain->Channel_ids[(unsigned int)(lpn % (int)( domain->Channel_no * Flash_Parameter_Set::SLC_MLC_Ratio ))];
+				else	
+					targetAddress.ChannelID = domain->Channel_ids[(unsigned int)(lpn % (int)( domain->Channel_no - domain->Channel_no * Flash_Parameter_Set::SLC_MLC_Ratio )
+					 + (int)( domain->Channel_no * Flash_Parameter_Set::SLC_MLC_Ratio ))];
+				if(DEBUG1) std::cout<< "LPN -> Channel:"<<lpn<<" -> "<<targetAddress.ChannelID <<"\n"; 
+				 
 			case Flash_Plane_Allocation_Scheme_Type::CWDP:
 				targetAddress.ChannelID = domain->Channel_ids[(unsigned int)(lpn % domain->Channel_no)];
 				targetAddress.ChipID = domain->Chip_ids[(unsigned int)((lpn / domain->Channel_no) % domain->Chip_no)];
@@ -1614,7 +1646,13 @@ namespace SSD_Components
 			NVM_Transaction_Flash_WR* writeTR = new NVM_Transaction_Flash_WR(Transaction_Source_Type::MAPPING, stream_id, SECTOR_SIZE_IN_BYTE * sector_no_per_page,
 				mvpn, mppn, NULL, mvpn, readTR, (((page_status_type)0x1) << sector_no_per_page) - 1, CurrentTimeStamp);
 			allocate_plane_for_translation_write(writeTR);
-			allocate_page_in_plane_for_translation_write(writeTR, mvpn, false);
+			allocate_page_in_plane_for_translation_write(writeTR, mvpn, false);// 在获取实际物理地址之后再重新修改sectors 数据
+			// Heterogeneous Page_Capacity: finalize size/bitmap after physical address is known, added
+			{
+				const unsigned int spp = sectors_per_page_for_address(channel_count, writeTR->Address);
+				writeTR->Data_and_metadata_size_in_byte = SECTOR_SIZE_IN_BYTE * spp;	//mapping writeback 的 writeTR 用全局 sector_no_per_page 计算 size/bitmap。
+				writeTR->write_sectors_bitmap = full_bitmap_for_sectors(spp);	//此处修改为实际计算后的值
+			}
 			domains[stream_id]->DepartingMappingEntries.insert(get_MVPN(lpn, stream_id));
 			ftl->TSU->Submit_transaction(writeTR);
 
@@ -1651,6 +1689,11 @@ namespace SSD_Components
 			NVM_Transaction_Flash_RD* readTR = new NVM_Transaction_Flash_RD(Transaction_Source_Type::MAPPING, stream_id,
 					SECTOR_SIZE_IN_BYTE, NO_LPA, NO_PPA, NULL, mvpn, ((page_status_type)0x1) << sector_no_per_page, CurrentTimeStamp);
 			Convert_ppa_to_address(ppn, readTR->Address);
+			// Heterogeneous Page_Capacity: adjust bitmap width based on target chip
+			{
+				const unsigned int spp = sectors_per_page_for_address(channel_count, readTR->Address);
+				readTR->read_sectors_bitmap = ((page_status_type)0x1) << spp;
+			}
 			block_manager->Read_transaction_issued(readTR->Address);//Inform block_manager as soon as the transaction's target address is determined
 			readTR->PPA = ppn;
 			ftl->TSU->Submit_transaction(readTR);
@@ -1777,8 +1820,8 @@ namespace SSD_Components
 					MVPN_type mpvn = (MVPN_type)flash_controller->Get_metadata(addr.ChannelID, addr.ChipID, addr.DieID, addr.PlaneID, addr.BlockID, addr.PageID);
 					if (domains[block->Stream_id]->GlobalTranslationDirectory[mpvn].MPPN != Convert_address_to_ppa(addr)) {
 						PRINT_ERROR("Inconsistency in the global translation directory when locking an MPVN!")
+						Set_barrier_for_accessing_mvpn(block->Stream_id, mpvn);
 					}
-                    Set_barrier_for_accessing_mvpn(block->Stream_id, mpvn);
 				} else {
 					LPA_type lpa = flash_controller->Get_metadata(addr.ChannelID, addr.ChipID, addr.DieID, addr.PlaneID, addr.BlockID, addr.PageID);
 					LPA_type ppa = domains[block->Stream_id]->GlobalMappingTable[lpa].PPA;
@@ -1840,6 +1883,10 @@ namespace SSD_Components
 			NVM_Transaction_Flash_RD* readTR = new NVM_Transaction_Flash_RD(Transaction_Source_Type::MAPPING, stream_id,
 					SECTOR_SIZE_IN_BYTE, NO_LPA, NO_PPA, NULL, mvpn, ((page_status_type)0x1) << sector_no_per_page, CurrentTimeStamp);
 			Convert_ppa_to_address(ppn, readTR->Address);
+			{// 对 readTR 在 Convert_ppa_to_address 后回填 read_sectors_bitmap
+				const unsigned int spp = sectors_per_page_for_address(channel_count, readTR->Address);
+				readTR->read_sectors_bitmap = ((page_status_type)0x1) << spp;
+			}
 			readTR->PPA = ppn;
 			Stats::Total_flash_reads_for_mapping++;
 			Stats::Total_flash_reads_for_mapping_per_stream[stream_id]++;
@@ -1875,6 +1922,8 @@ namespace SSD_Components
 			MPPN_type mppn = domains[stream_id]->GlobalTranslationDirectory[mvpn].MPPN;
 			NVM_Transaction_Flash_WR* writeTR = new NVM_Transaction_Flash_WR(Transaction_Source_Type::MAPPING, stream_id, SECTOR_SIZE_IN_BYTE * sector_no_per_page,
 				mvpn, mppn, NULL, mvpn, NULL, (((page_status_type)0x1) << sector_no_per_page) - 1, CurrentTimeStamp);
+				// 此处未分配物理地址（屏障快速路径）。使用当前全局大小作为安全上限。
+				// 映射模块将在页面实际写入时根据扇区/页面解释位图。
 
 			Stats::Total_flash_reads_for_mapping++;
 			Stats::Total_flash_writes_for_mapping++;

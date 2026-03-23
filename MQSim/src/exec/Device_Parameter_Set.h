@@ -53,10 +53,13 @@ public:
 	static unsigned int Flash_Channel_Width;//Channel width in byte
 	static unsigned int Channel_Transfer_Rate;//MT/s
 	static unsigned int Chip_No_Per_Channel;
+	static double SLC_MLC_Ratio;	//add ed
 	static SSD_Components::ONFI_Protocol Flash_Comm_Protocol;
 	static Flash_Parameter_Set Flash_Parameters;
 	void XML_serialize(Utils::XmlWriter& xmlwriter);
 	void XML_deserialize(rapidxml::xml_node<> *node);
+//private:
+	int sim_time_rate = 4;
 };
 
 #endif // !DEVICE_PARAMETER_SET_H

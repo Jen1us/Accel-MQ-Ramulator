@@ -427,14 +427,24 @@ namespace SSD_Components
 					}
 				}
 			}//else of if (stat->Type == Utils::Workload_Type::SYNTHETIC)
-			
+
+			/*这段代码的核心目标是通过数学建模，预处理（Preconditioning）出 SSD 进入稳态（Steady-state）时物理块中有效页数量的概率分布。
+			在模拟器开始正式运行前，如果直接从“空盘”开始，测试结果是不准确的。这段代码利用学术界公认的数学模型（主要基于 B. Van Houdt 的均值场模型），
+			直接计算出 SSD 在长时间运行后，内部物理块的“脏”程度分布。
+			以下是详细的代码逻辑拆解：
+			1. 根据 GC 策略计算初始概率分布
+			代码通过 switch 判断当前 SSD 配置的垃圾回收（GC）策略，因为不同的策略会导致物理块中有效页（Valid Pages）的留存情况截然不同*/
+
 			//Step 2: Determine the probability distribution function of valid pages in blocks, in the steady-state.
 			//Note: if hot/cold separation is required, then the following estimations should be changed according to Van Houtd's paper in Performance Evaluation 2014.
 			std::vector<double> steadystate_block_status_probability;//The probability distribution function of the number of valid pages in a block in the steadystate
+
+			std::map<Flash_Technology_Type, std::vector<double>> steadystate_block_status_probabilitys;//不同闪存技术的稳态块状态概率分布
 			double rho = stat->Initial_occupancy_ratio * (1 - over_provisioning_ratio) / (1 - double(GC_and_WL_Unit->Get_minimum_number_of_free_pages_before_GC()) / block_no_per_plane);
 			switch (decision_dist_type) {
 			case Utils::Address_Distribution_Type::RANDOM_HOTCOLD://Estimate the steady-state of the hot/cold traffic based on the steady-state of the uniform traffic
 			{
+				
 				double r_to_f_ratio = std::sqrt(double(stat->Ratio_of_traffic_accessing_hot_region) / double(stat->Ratio_of_hot_addresses_to_whole_working_set));
 				switch (GC_and_WL_Unit->Get_gc_policy()) {
 					case GC_Block_Selection_Policy_Type::GREEDY://Based on: B. Van Houdt, "A mean field model for a class of garbage collection algorithms in flash-based solid state drives", SIGMETRICS 2013.
@@ -625,7 +635,7 @@ namespace SSD_Components
 			//Check if probability distribution is correct
 			for (unsigned int i = 0; i <= page_no_per_block; i++) {
 				sum += steadystate_block_status_probability[i];
-			}
+			}//累加稳态块状态概率分布，用于验证概率分布是否正确（总和应接近1）。这是 FTL 预条件处理中验证概率分布正确性的步骤。
 
 			//Due to some precision errors the sum may not be exactly equal to 1
 			if (sum > 1.001 || sum < 0.99) {

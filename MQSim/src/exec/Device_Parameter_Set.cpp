@@ -15,9 +15,9 @@ unsigned int Device_Parameter_Set::Data_Cache_Capacity = 1024 * 1024 * 512;//Dat
 unsigned int Device_Parameter_Set::Data_Cache_DRAM_Row_Size = 8192;//The row size of DRAM in the data cache, the unit is bytes
 unsigned int Device_Parameter_Set::Data_Cache_DRAM_Data_Rate = 800;//Data access rate to access DRAM in the data cache, the unit is MT/s
 unsigned int Device_Parameter_Set::Data_Cache_DRAM_Data_Busrt_Size = 4;//The number of bytes that are transferred in one burst (it depends on the number of DRAM chips)
-sim_time_type Device_Parameter_Set::Data_Cache_DRAM_tRCD = 13;//tRCD parameter to access DRAM in the data cache, the unit is nano-seconds
-sim_time_type Device_Parameter_Set::Data_Cache_DRAM_tCL = 13;//tCL parameter to access DRAM in the data cache, the unit is nano-seconds
-sim_time_type Device_Parameter_Set::Data_Cache_DRAM_tRP = 13;//tRP parameter to access DRAM in the data cache, the unit is nano-seconds
+sim_time_type Device_Parameter_Set::Data_Cache_DRAM_tRCD = 13 * SIM_TIME_TICK_PER_NANOSECOND;//tRCD parameter to access DRAM in the data cache, the unit is nano-seconds
+sim_time_type Device_Parameter_Set::Data_Cache_DRAM_tCL = 13 * SIM_TIME_TICK_PER_NANOSECOND;//tCL parameter to access DRAM in the data cache, the unit is nano-seconds
+sim_time_type Device_Parameter_Set::Data_Cache_DRAM_tRP = 13 * SIM_TIME_TICK_PER_NANOSECOND;//tRP parameter to access DRAM in the data cache, the unit is nano-seconds
 SSD_Components::Flash_Address_Mapping_Type Device_Parameter_Set::Address_Mapping = SSD_Components::Flash_Address_Mapping_Type::PAGE_LEVEL;
 bool Device_Parameter_Set::Ideal_Mapping_Table = false;//If mapping is ideal, then all the mapping entries are found in the DRAM and there is no need to read mapping entries from flash
 unsigned int Device_Parameter_Set::CMT_Capacity = 2 * 1024 * 1024;//Size of SRAM/DRAM space that is used to cache address mapping table in bytes
@@ -33,13 +33,15 @@ double Device_Parameter_Set::GC_Hard_Threshold = 0.005;//The hard gc execution t
 bool Device_Parameter_Set::Dynamic_Wearleveling_Enabled = true;
 bool Device_Parameter_Set::Static_Wearleveling_Enabled = true;
 unsigned int Device_Parameter_Set::Static_Wearleveling_Threshold = 100;
-sim_time_type Device_Parameter_Set::Preferred_suspend_erase_time_for_read = 700000;//in nano-seconds
-sim_time_type Device_Parameter_Set::Preferred_suspend_erase_time_for_write = 700000;//in nano-seconds
-sim_time_type Device_Parameter_Set::Preferred_suspend_write_time_for_read = 100000;//in nano-seconds
+sim_time_type Device_Parameter_Set::Preferred_suspend_erase_time_for_read = 700000 * SIM_TIME_TICK_PER_NANOSECOND;//in nano-seconds
+sim_time_type Device_Parameter_Set::Preferred_suspend_erase_time_for_write = 700000 * SIM_TIME_TICK_PER_NANOSECOND;//in nano-seconds
+sim_time_type Device_Parameter_Set::Preferred_suspend_write_time_for_read = 100000 * SIM_TIME_TICK_PER_NANOSECOND;//in nano-seconds
 unsigned int Device_Parameter_Set::Flash_Channel_Count = 8;
 unsigned int Device_Parameter_Set::Flash_Channel_Width = 1;//Channel width in byte
 unsigned int Device_Parameter_Set::Channel_Transfer_Rate = 300;//MT/s
 unsigned int Device_Parameter_Set::Chip_No_Per_Channel = 4;
+//add new
+double Device_Parameter_Set::SLC_MLC_Ratio = 1;
 SSD_Components::ONFI_Protocol Device_Parameter_Set::Flash_Comm_Protocol = SSD_Components::ONFI_Protocol::NVDDR2;
 Flash_Parameter_Set Device_Parameter_Set::Flash_Parameters;
 
@@ -358,6 +360,10 @@ void Device_Parameter_Set::XML_serialize(Utils::XmlWriter& xmlwriter)
 	attr = "Chip_No_Per_Channel";
 	val = std::to_string(Chip_No_Per_Channel);
 	xmlwriter.Write_attribute_string(attr, val);
+	
+	attr = "SLC_MLC_Ratio";	//add ed
+	val = std::to_string(SLC_MLC_Ratio);
+	xmlwriter.Write_attribute_string(attr, val);
 
 	attr = "Flash_Comm_Protocol";
 	switch (Flash_Comm_Protocol) {
@@ -617,6 +623,10 @@ void Device_Parameter_Set::XML_deserialize(rapidxml::xml_node<> *node)
 			} else if (strcmp(param->name(), "Chip_No_Per_Channel") == 0) {
 				std::string val = param->value();
 				Chip_No_Per_Channel = std::stoul(val);
+			} else if (strcmp(param->name(), "SLC_MLC_Ratio") == 0) {		//add
+				std::string val = param->value();
+				SLC_MLC_Ratio = std::stod(val);
+				Flash_Parameters.SLC_MLC_Ratio = SLC_MLC_Ratio;
 			} else if (strcmp(param->name(), "Flash_Comm_Protocol") == 0) {
 				std::string val = param->value();
 				std::transform(val.begin(), val.end(), val.begin(), ::toupper);
@@ -626,7 +636,7 @@ void Device_Parameter_Set::XML_deserialize(rapidxml::xml_node<> *node)
 					PRINT_ERROR("Unknown flash communication protocol type specified in the SSD configuration file")
 				}
 			}
-			else if (strcmp(param->name(), "Flash_Parameter_Set") == 0)
+			else if (strcmp(param->name(), "Flash_Parameter_Sets") == 0)
 			{
 				Flash_Parameters.XML_deserialize(param);
 			}

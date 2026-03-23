@@ -1,7 +1,12 @@
 #include "GC_and_WL_Unit_Base.h"
+#include "../exec/Flash_Parameter_Set.h"
 
 namespace SSD_Components
 {
+	static inline unsigned int gc_sectors_per_page(unsigned int channel_count, const NVM::FlashMemory::Physical_Page_Address& addr)
+	{
+		return Flash_Parameter_Set::Get_sector_num_by_Address(channel_count, (int)addr.ChannelID, (int)addr.ChipID);
+	}
 	GC_and_WL_Unit_Base* GC_and_WL_Unit_Base::_my_instance;
 	
 	GC_and_WL_Unit_Base::GC_and_WL_Unit_Base(const sim_object_id_type& id,
@@ -76,14 +81,16 @@ namespace SSD_Components
 									Stats::Total_page_movements_for_gc++;
 									gc_wl_candidate_address.PageID = pageID;
 									if (_my_instance->use_copyback) {
-										gc_wl_write = new NVM_Transaction_Flash_WR(Transaction_Source_Type::GC_WL, block->Stream_id, _my_instance->sector_no_per_page * SECTOR_SIZE_IN_BYTE,
+										const unsigned int spp = gc_sectors_per_page(_my_instance->channel_count, gc_wl_candidate_address);
+										gc_wl_write = new NVM_Transaction_Flash_WR(Transaction_Source_Type::GC_WL, block->Stream_id, spp * SECTOR_SIZE_IN_BYTE,
 											NO_LPA, _my_instance->address_mapping_unit->Convert_address_to_ppa(gc_wl_candidate_address), NULL, 0, NULL, 0, INVALID_TIME_STAMP);
 										gc_wl_write->ExecutionMode = WriteExecutionModeType::COPYBACK;
 										_my_instance->tsu->Submit_transaction(gc_wl_write);
 									} else {
-										gc_wl_read = new NVM_Transaction_Flash_RD(Transaction_Source_Type::GC_WL, block->Stream_id, _my_instance->sector_no_per_page * SECTOR_SIZE_IN_BYTE,
+										const unsigned int spp = gc_sectors_per_page(_my_instance->channel_count, gc_wl_candidate_address);
+										gc_wl_read = new NVM_Transaction_Flash_RD(Transaction_Source_Type::GC_WL, block->Stream_id, spp * SECTOR_SIZE_IN_BYTE,
 											NO_LPA, _my_instance->address_mapping_unit->Convert_address_to_ppa(gc_wl_candidate_address), gc_wl_candidate_address, NULL, 0, NULL, 0, INVALID_TIME_STAMP);
-										gc_wl_write = new NVM_Transaction_Flash_WR(Transaction_Source_Type::GC_WL, block->Stream_id, _my_instance->sector_no_per_page * SECTOR_SIZE_IN_BYTE,
+										gc_wl_write = new NVM_Transaction_Flash_WR(Transaction_Source_Type::GC_WL, block->Stream_id, spp * SECTOR_SIZE_IN_BYTE,
 											NO_LPA, NO_PPA, gc_wl_candidate_address, NULL, 0, gc_wl_read, 0, INVALID_TIME_STAMP);
 										gc_wl_write->ExecutionMode = WriteExecutionModeType::SIMPLE;
 										gc_wl_write->RelatedErase = gc_wl_erase_tr;

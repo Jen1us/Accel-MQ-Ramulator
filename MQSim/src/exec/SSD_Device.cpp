@@ -32,44 +32,62 @@ SSD_Device::SSD_Device(Device_Parameter_Set *parameters, std::vector<IO_Flow_Par
 	{
 	case NVM::NVM_Type::FLASH:
 	{
-		sim_time_type *read_latencies, *write_latencies;
-		sim_time_type average_flash_read_latency = 0, average_flash_write_latency = 0; //Required for FTL initialization
+		// sim_time_type *read_latencies, *write_latencies;	//芯片使用独立延迟数组，此处即不统计
+		//sim_time_type average_flash_read_latency = 0, average_flash_write_latency = 0; //Required for FTL initialization
 
 		//Step 1: create memory chips (flash chips in our case)
-		switch (parameters->Flash_Parameters.Flash_Technology)
-		{
-		case Flash_Technology_Type::SLC:
-			read_latencies = new sim_time_type[1];
-			read_latencies[0] = parameters->Flash_Parameters.Page_Read_Latency_LSB;
-			write_latencies = new sim_time_type[1];
-			write_latencies[0] = parameters->Flash_Parameters.Page_Program_Latency_LSB;
-			average_flash_read_latency = read_latencies[0];
-			average_flash_write_latency = write_latencies[0];
-			break;
-		case Flash_Technology_Type::MLC:
-			read_latencies = new sim_time_type[2];
-			read_latencies[0] = parameters->Flash_Parameters.Page_Read_Latency_LSB;
-			read_latencies[1] = parameters->Flash_Parameters.Page_Read_Latency_MSB;
-			write_latencies = new sim_time_type[2];
-			write_latencies[0] = parameters->Flash_Parameters.Page_Program_Latency_LSB;
-			write_latencies[1] = parameters->Flash_Parameters.Page_Program_Latency_MSB;
-			average_flash_read_latency = (read_latencies[0] + read_latencies[1]) / 2;
-			average_flash_write_latency = (write_latencies[0] + write_latencies[1]) / 2;
-			break;
-		case Flash_Technology_Type::TLC:
-			read_latencies = new sim_time_type[3];
-			read_latencies[0] = parameters->Flash_Parameters.Page_Read_Latency_LSB;
-			read_latencies[1] = parameters->Flash_Parameters.Page_Read_Latency_CSB;
-			read_latencies[2] = parameters->Flash_Parameters.Page_Read_Latency_MSB;
-			write_latencies = new sim_time_type[3];
-			write_latencies[0] = parameters->Flash_Parameters.Page_Program_Latency_LSB;
-			write_latencies[1] = parameters->Flash_Parameters.Page_Program_Latency_CSB;
-			write_latencies[2] = parameters->Flash_Parameters.Page_Program_Latency_MSB;
-			average_flash_read_latency = (read_latencies[0] + read_latencies[1] + read_latencies[2]) / 3;
-			average_flash_write_latency = (write_latencies[0] + write_latencies[1] + write_latencies[2]) / 3;
-			break;
-		default:
-			throw std::invalid_argument("The specified flash technologies is not supported");
+		sim_time_type average_flash_read_latency = 0, average_flash_write_latency = 0;
+		
+		if (Flash_Parameter_Set::Flash_Parameter_Sets.size() > 0) {
+			// 多参数集模式：计算所有类型的平均延迟
+			sim_time_type total_read = 0, total_write = 0;
+			unsigned int count = 0;
+			for (const auto& pair : Flash_Parameter_Set::Flash_Parameter_Sets) {
+				const auto& params = pair.second;
+				switch (pair.first) {
+				case Flash_Technology_Type::SLC:
+					total_read += params.Page_Read_Latency_LSB;
+					total_write += params.Page_Program_Latency_LSB;
+					count++;
+					break;
+				case Flash_Technology_Type::MLC:
+					total_read += (params.Page_Read_Latency_LSB + params.Page_Read_Latency_MSB) / 2;
+					total_write += (params.Page_Program_Latency_LSB + params.Page_Program_Latency_MSB) / 2;
+					count++;
+					break;
+				case Flash_Technology_Type::TLC:
+					total_read += (params.Page_Read_Latency_LSB + params.Page_Read_Latency_CSB + params.Page_Read_Latency_MSB) / 3;
+					total_write += (params.Page_Program_Latency_LSB + params.Page_Program_Latency_CSB + params.Page_Program_Latency_MSB) / 3;
+					count++;
+					break;
+				default:
+				throw std::invalid_argument("The specified flash technologies is not supported");
+		
+				}
+			}
+			if (count > 0) {
+				average_flash_read_latency = total_read / count;
+				average_flash_write_latency = total_write / count;
+			}
+		} else {
+			// 单参数集模式：使用原有逻辑
+			switch (parameters->Flash_Parameters.Flash_Technology)
+			{
+			case Flash_Technology_Type::SLC:
+				average_flash_read_latency = parameters->Flash_Parameters.Page_Read_Latency_LSB;
+				average_flash_write_latency = parameters->Flash_Parameters.Page_Program_Latency_LSB;
+				break;
+			case Flash_Technology_Type::MLC:
+				average_flash_read_latency = (parameters->Flash_Parameters.Page_Read_Latency_LSB + parameters->Flash_Parameters.Page_Read_Latency_MSB) / 2;
+				average_flash_write_latency = (parameters->Flash_Parameters.Page_Program_Latency_LSB + parameters->Flash_Parameters.Page_Program_Latency_MSB) / 2;
+				break;
+			case Flash_Technology_Type::TLC:
+				average_flash_read_latency = (parameters->Flash_Parameters.Page_Read_Latency_LSB + parameters->Flash_Parameters.Page_Read_Latency_CSB + parameters->Flash_Parameters.Page_Read_Latency_MSB) / 3;
+				average_flash_write_latency = (parameters->Flash_Parameters.Page_Program_Latency_LSB + parameters->Flash_Parameters.Page_Program_Latency_CSB + parameters->Flash_Parameters.Page_Program_Latency_MSB) / 3;
+				break;
+			default:
+				throw std::invalid_argument("The specified flash technologies is not supported");
+			}
 		}
 
 		//Step 2: create memory channels to connect chips to the controller
@@ -85,36 +103,121 @@ SSD_Device::SSD_Device(Device_Parameter_Set *parameters, std::vector<IO_Flow_Par
 				NVM::FlashMemory::Flash_Chip **chips = new NVM::FlashMemory::Flash_Chip *[parameters->Chip_No_Per_Channel];
 				for (unsigned int chip_cntr = 0; chip_cntr < parameters->Chip_No_Per_Channel; chip_cntr++)
 				{
-					chips[chip_cntr] = new NVM::FlashMemory::Flash_Chip(device->ID() + ".Channel." + std::to_string(channel_cntr) + ".Chip." + std::to_string(chip_cntr),
-																		channel_cntr, chip_cntr, parameters->Flash_Parameters.Flash_Technology, parameters->Flash_Parameters.Die_No_Per_Chip, parameters->Flash_Parameters.Plane_No_Per_Die,
-																		parameters->Flash_Parameters.Block_No_Per_Plane, parameters->Flash_Parameters.Page_No_Per_Block,
-																		read_latencies, write_latencies, parameters->Flash_Parameters.Block_Erase_Latency,
-																		parameters->Flash_Parameters.Suspend_Program_Time, parameters->Flash_Parameters.Suspend_Erase_Time);
+					// chips[chip_cntr] = new NVM::FlashMemory::Flash_Chip(device->ID() + ".Channel." + std::to_string(channel_cntr) + ".Chip." + std::to_string(chip_cntr),
+					// 													channel_cntr, chip_cntr, parameters->Flash_Parameters.Flash_Technology, parameters->Flash_Parameters.Die_No_Per_Chip, parameters->Flash_Parameters.Plane_No_Per_Die,
+					// 													parameters->Flash_Parameters.Block_No_Per_Plane, parameters->Flash_Parameters.Page_No_Per_Block,
+					// 													read_latencies, write_latencies, parameters->Flash_Parameters.Block_Erase_Latency,
+					// 													parameters->Flash_Parameters.Suspend_Program_Time, parameters->Flash_Parameters.Suspend_Erase_Time);
+
+					// 根据地址选择闪存技术类型 (静态成员函数形式调用)
+					Flash_Technology_Type selected_tech = 
+						//Flash_Parameter_Set::Select_Technology_By_Address(Chip_no_per_channel, channel_cntr, chip_cntr);
+						Flash_Parameter_Set::Select_Technology_By_Address(Channel_count, channel_cntr, chip_cntr);//改为分channel对半排布
+
+					// 获取对应技术类型的参数
+					const Flash_Parameter_Set::Flash_Params& tech_params = 
+						Flash_Parameter_Set::Get_Parameters(selected_tech);
+
+					// 根据选择的技术类型准备延迟数组
+					sim_time_type *chip_read_latencies, *chip_write_latencies;
+					switch (selected_tech) {
+					case Flash_Technology_Type::SLC:
+						chip_read_latencies = new sim_time_type[1];
+						chip_read_latencies[0] = tech_params.Page_Read_Latency_LSB;
+						chip_write_latencies = new sim_time_type[1];
+						chip_write_latencies[0] = tech_params.Page_Program_Latency_LSB;
+						break;
+					case Flash_Technology_Type::MLC:
+						chip_read_latencies = new sim_time_type[2];
+						chip_read_latencies[0] = tech_params.Page_Read_Latency_LSB;
+						chip_read_latencies[1] = tech_params.Page_Read_Latency_MSB;
+						chip_write_latencies = new sim_time_type[2];
+						chip_write_latencies[0] = tech_params.Page_Program_Latency_LSB;
+						chip_write_latencies[1] = tech_params.Page_Program_Latency_MSB;
+						break;
+					case Flash_Technology_Type::TLC:
+						chip_read_latencies = new sim_time_type[3];
+						chip_read_latencies[0] = tech_params.Page_Read_Latency_LSB;
+						chip_read_latencies[1] = tech_params.Page_Read_Latency_CSB;
+						chip_read_latencies[2] = tech_params.Page_Read_Latency_MSB;
+						chip_write_latencies = new sim_time_type[3];
+						chip_write_latencies[0] = tech_params.Page_Program_Latency_LSB;
+						chip_write_latencies[1] = tech_params.Page_Program_Latency_CSB;
+						chip_write_latencies[2] = tech_params.Page_Program_Latency_MSB;
+						break;
+					default:
+						throw std::invalid_argument("Unsupported flash technology type");
+					}
+					// if(DEBUG)std::cout << "Creating Chips...\n" 
+					// 			<< device->ID() 
+					// 			<< ".Channel." << channel_cntr 
+					// 			<< ".Chip." << chip_cntr 
+					// 			<< ".type"	<< (tech_params.Flash_Technology == Flash_Technology_Type::SLC ?"SLC":"MLC+")
+					// 			<< ".Page_Capacity=" << tech_params.Page_Capacity
+					// 			<< ".SectorsPerPage=" << (tech_params.Page_Capacity / SECTOR_SIZE_IN_BYTE)
+					// 			<< std::endl;
+
+					chips[chip_cntr] = new NVM::FlashMemory::Flash_Chip(
+						device->ID() + ".Channel." + std::to_string(channel_cntr) + ".Chip." + std::to_string(chip_cntr),
+						channel_cntr, chip_cntr, selected_tech, 
+						tech_params.Die_No_Per_Chip, tech_params.Plane_No_Per_Die,
+						tech_params.Block_No_Per_Plane, tech_params.Page_No_Per_Block,
+						chip_read_latencies, chip_write_latencies, 
+						tech_params.Block_Erase_Latency,
+						tech_params.Suspend_Program_Time, tech_params.Suspend_Erase_Time);
+					//Simulator->AddObject(chips[chip_cntr]); //Each simulation object (a child of MQSimEngine::Sim_Object) should be added to the engine
+
+					// 清理临时延迟数组
+					delete[] chip_read_latencies;
+					delete[] chip_write_latencies;
+					
 					Simulator->AddObject(chips[chip_cntr]); //Each simulation object (a child of MQSimEngine::Sim_Object) should be added to the engine
 				}
 				channels[channel_cntr] = new SSD_Components::ONFI_Channel_NVDDR2(channel_cntr, parameters->Chip_No_Per_Channel,
-																				 chips, parameters->Flash_Channel_Width,
-																				 (sim_time_type)((double)1000 / parameters->Channel_Transfer_Rate) * 2, (sim_time_type)((double)1000 / parameters->Channel_Transfer_Rate) * 2);
+																				chips, parameters->Flash_Channel_Width,
+																				(sim_time_type)((double)1000* SIM_TIME_TICK_PER_NANOSECOND / parameters->Channel_Transfer_Rate) * 2, (sim_time_type)((double)1000* SIM_TIME_TICK_PER_NANOSECOND / parameters->Channel_Transfer_Rate) * 2);
 				device->Channels.push_back(channels[channel_cntr]); //Channels should not be added to the simulator core, they are passive object that do not handle any simulation event
 			}
 
 			//Step 3: create channel controller and connect channels to it
+			// NVM_PHY_ONFI_NVDDR2 对整条通道使用统一的 die_no / plane_no 分配 bookkeeping（见 NVM_PHY_ONFI_NVDDR2.cpp）。
+			// 异构 LC 时：PHY 取各 Flash_Parameter_Sets 中 Die_No_Per_Chip / Plane_No_Per_Die 的**最大值**，
+			// 避免某颗 chip 实际 die/plane 更多时访问 Die_book_keeping_records 越界；每颗 Flash_Chip 仍用各自 tech_params 构造。
+			unsigned int die_no = parameters->Flash_Parameters.Die_No_Per_Chip;
+			unsigned int plane_no = parameters->Flash_Parameters.Plane_No_Per_Die;
+			if (Flash_Parameter_Set::Flash_Parameter_Sets.size() > 0) {
+				//die_no = Flash_Parameter_Set::Flash_Parameter_Sets.begin()->second.Die_No_Per_Chip;
+				//plane_no = Flash_Parameter_Set::Flash_Parameter_Sets.begin()->second.Plane_No_Per_Die;
+				die_no = 0;
+				plane_no = 0;
+				for (const auto& kv : Flash_Parameter_Set::Flash_Parameter_Sets) {
+					const auto& p = kv.second;
+					if (p.Die_No_Per_Chip > die_no) die_no = p.Die_No_Per_Chip;
+					if (p.Plane_No_Per_Die > plane_no) plane_no = p.Plane_No_Per_Die;
+				}
+			}
+			// device->PHY = new SSD_Components::NVM_PHY_ONFI_NVDDR2(device->ID() + ".PHY", channels, parameters->Flash_Channel_Count, parameters->Chip_No_Per_Channel,
+			// 													  parameters->Flash_Parameters.Die_No_Per_Chip, parameters->Flash_Parameters.Plane_No_Per_Die);
+			
 			device->PHY = new SSD_Components::NVM_PHY_ONFI_NVDDR2(device->ID() + ".PHY", channels, parameters->Flash_Channel_Count, parameters->Chip_No_Per_Channel,
-																  parameters->Flash_Parameters.Die_No_Per_Chip, parameters->Flash_Parameters.Plane_No_Per_Die);
+			die_no, plane_no);
+			//parameters->Flash_Parameters.Die_No_Per_Chip, parameters->Flash_Parameters.Plane_No_Per_Die);
 			Simulator->AddObject(device->PHY);
 			break;
 		}
 		default:
 			throw std::invalid_argument("No implementation is available for the specified flash communication protocol");
 		}
-		delete[] read_latencies;
-		delete[] write_latencies;
+		// delete[] read_latencies;
+		// delete[] write_latencies;
 
 		//Steps 4 - 8: create FTL components and connect them together
+		const unsigned int max_sector_num_per_page = Flash_Parameter_Set::Get_Max_sector_num_per_page();
+
 		SSD_Components::FTL *ftl = new SSD_Components::FTL(device->ID() + ".FTL", NULL, parameters->Flash_Channel_Count,
 														   parameters->Chip_No_Per_Channel, parameters->Flash_Parameters.Die_No_Per_Chip, parameters->Flash_Parameters.Plane_No_Per_Die,
 														   parameters->Flash_Parameters.Block_No_Per_Plane, parameters->Flash_Parameters.Page_No_Per_Block,
-														   parameters->Flash_Parameters.Page_Capacity / SECTOR_SIZE_IN_BYTE, average_flash_read_latency, average_flash_write_latency, parameters->Overprovisioning_Ratio,
+														   max_sector_num_per_page, average_flash_read_latency, average_flash_write_latency, parameters->Overprovisioning_Ratio,
 														   parameters->Flash_Parameters.Block_PE_Cycles_Limit, parameters->Seed++);
 		ftl->PHY = (SSD_Components::NVM_PHY_ONFI *)PHY;
 		Simulator->AddObject(ftl);
@@ -266,7 +369,7 @@ SSD_Device::SSD_Device(Device_Parameter_Set *parameters, std::vector<IO_Flow_Par
 																					 parameters->Flash_Channel_Count, parameters->Chip_No_Per_Channel, parameters->Flash_Parameters.Die_No_Per_Chip, parameters->Flash_Parameters.Plane_No_Per_Die,
 																					 flow_channel_id_assignments, flow_chip_id_assignments, flow_die_id_assignments, flow_plane_id_assignments,
 																					 parameters->Flash_Parameters.Block_No_Per_Plane, parameters->Flash_Parameters.Page_No_Per_Block,
-																					 parameters->Flash_Parameters.Page_Capacity / SECTOR_SIZE_IN_BYTE, parameters->Overprovisioning_Ratio);
+																					 max_sector_num_per_page, parameters->Overprovisioning_Ratio);
 		switch (parameters->Address_Mapping)
 		{
 		case SSD_Components::Flash_Address_Mapping_Type::PAGE_LEVEL:
@@ -275,7 +378,7 @@ SSD_Device::SSD_Device(Device_Parameter_Set *parameters, std::vector<IO_Flow_Par
 																	  parameters->Flash_Channel_Count, parameters->Chip_No_Per_Channel, parameters->Flash_Parameters.Die_No_Per_Chip, parameters->Flash_Parameters.Plane_No_Per_Die,
 																	  flow_channel_id_assignments, flow_chip_id_assignments, flow_die_id_assignments, flow_plane_id_assignments,
 																	  parameters->Flash_Parameters.Block_No_Per_Plane, parameters->Flash_Parameters.Page_No_Per_Block,
-																	  parameters->Flash_Parameters.Page_Capacity / SECTOR_SIZE_IN_BYTE, parameters->Flash_Parameters.Page_Capacity, parameters->Overprovisioning_Ratio,
+																	  max_sector_num_per_page, max_sector_num_per_page * SECTOR_SIZE_IN_BYTE, parameters->Overprovisioning_Ratio,
 																	  parameters->CMT_Sharing_Mode);
 			break;
 		case SSD_Components::Flash_Address_Mapping_Type::HYBRID:
@@ -283,7 +386,7 @@ SSD_Device::SSD_Device(Device_Parameter_Set *parameters, std::vector<IO_Flow_Par
 																  fbm, parameters->Ideal_Mapping_Table, stream_count,
 																  parameters->Flash_Channel_Count, parameters->Chip_No_Per_Channel, parameters->Flash_Parameters.Die_No_Per_Chip,
 																  parameters->Flash_Parameters.Plane_No_Per_Die, parameters->Flash_Parameters.Block_No_Per_Plane, parameters->Flash_Parameters.Page_No_Per_Block,
-																  parameters->Flash_Parameters.Page_Capacity / SECTOR_SIZE_IN_BYTE, parameters->Flash_Parameters.Page_Capacity, parameters->Overprovisioning_Ratio);
+																  max_sector_num_per_page, max_sector_num_per_page * SECTOR_SIZE_IN_BYTE, parameters->Overprovisioning_Ratio);
 			break;
 		default:
 			throw std::invalid_argument("No implementation is available fo the secified address mapping strategy");
@@ -307,7 +410,7 @@ SSD_Device::SSD_Device(Device_Parameter_Set *parameters, std::vector<IO_Flow_Par
 															 parameters->Flash_Channel_Count, parameters->Chip_No_Per_Channel,
 															 parameters->Flash_Parameters.Die_No_Per_Chip, parameters->Flash_Parameters.Plane_No_Per_Die,
 															 parameters->Flash_Parameters.Block_No_Per_Plane, parameters->Flash_Parameters.Page_No_Per_Block,
-															 parameters->Flash_Parameters.Page_Capacity / SECTOR_SIZE_IN_BYTE, parameters->Use_Copyback_for_GC, max_rho, 10,
+															 max_sector_num_per_page, parameters->Use_Copyback_for_GC, max_rho, 10,
 															 parameters->Seed++);
 		Simulator->AddObject(gcwl);
 		fbm->Set_GC_and_WL_Unit(gcwl);
@@ -328,7 +431,7 @@ SSD_Device::SSD_Device(Device_Parameter_Set *parameters, std::vector<IO_Flow_Par
 																	  parameters->Data_Cache_Capacity, parameters->Data_Cache_DRAM_Row_Size, parameters->Data_Cache_DRAM_Data_Rate,
 																	  parameters->Data_Cache_DRAM_Data_Busrt_Size, parameters->Data_Cache_DRAM_tRCD, parameters->Data_Cache_DRAM_tCL, parameters->Data_Cache_DRAM_tRP,
 																	  caching_modes, (unsigned int)io_flows->size(),
-																	  parameters->Flash_Parameters.Page_Capacity / SECTOR_SIZE_IN_BYTE, parameters->Flash_Channel_Count * parameters->Chip_No_Per_Channel * parameters->Flash_Parameters.Die_No_Per_Chip * parameters->Flash_Parameters.Plane_No_Per_Die * parameters->Flash_Parameters.Page_Capacity / SECTOR_SIZE_IN_BYTE);
+																	  max_sector_num_per_page, parameters->Flash_Channel_Count * parameters->Chip_No_Per_Channel * parameters->Flash_Parameters.Die_No_Per_Chip * parameters->Flash_Parameters.Plane_No_Per_Die * max_sector_num_per_page);
 
 			break;
 		case SSD_Components::Caching_Mechanism::ADVANCED:
@@ -336,7 +439,7 @@ SSD_Device::SSD_Device(Device_Parameter_Set *parameters, std::vector<IO_Flow_Par
 																		parameters->Data_Cache_Capacity, parameters->Data_Cache_DRAM_Row_Size, parameters->Data_Cache_DRAM_Data_Rate,
 																		parameters->Data_Cache_DRAM_Data_Busrt_Size, parameters->Data_Cache_DRAM_tRCD, parameters->Data_Cache_DRAM_tCL, parameters->Data_Cache_DRAM_tRP,
 																		caching_modes, parameters->Data_Cache_Sharing_Mode, (unsigned int)io_flows->size(),
-																		parameters->Flash_Parameters.Page_Capacity / SECTOR_SIZE_IN_BYTE, parameters->Flash_Channel_Count * parameters->Chip_No_Per_Channel * parameters->Flash_Parameters.Die_No_Per_Chip * parameters->Flash_Parameters.Plane_No_Per_Die * parameters->Flash_Parameters.Page_Capacity / SECTOR_SIZE_IN_BYTE);
+																		max_sector_num_per_page, parameters->Flash_Channel_Count * parameters->Chip_No_Per_Channel * parameters->Flash_Parameters.Die_No_Per_Chip * parameters->Flash_Parameters.Plane_No_Per_Die * max_sector_num_per_page);
 
 			break;
 		default:
@@ -353,11 +456,11 @@ SSD_Device::SSD_Device(Device_Parameter_Set *parameters, std::vector<IO_Flow_Par
 		case HostInterface_Types::NVME:
 			device->Host_interface = new SSD_Components::Host_Interface_NVMe(device->ID() + ".HostInterface",
 																			 Utils::Logical_Address_Partitioning_Unit::Get_total_device_lha_count(), parameters->IO_Queue_Depth, parameters->IO_Queue_Depth,
-																			 (unsigned int)io_flows->size(), parameters->Queue_Fetch_Size, parameters->Flash_Parameters.Page_Capacity / SECTOR_SIZE_IN_BYTE, dcm);
+																			 (unsigned int)io_flows->size(), parameters->Queue_Fetch_Size, max_sector_num_per_page, dcm);
 			break;
 		case HostInterface_Types::SATA:
 			device->Host_interface = new SSD_Components::Host_Interface_SATA(device->ID() + ".HostInterface",
-																			 parameters->IO_Queue_Depth, Utils::Logical_Address_Partitioning_Unit::Get_total_device_lha_count(), parameters->Flash_Parameters.Page_Capacity / SECTOR_SIZE_IN_BYTE, dcm);
+																			 parameters->IO_Queue_Depth, Utils::Logical_Address_Partitioning_Unit::Get_total_device_lha_count(), max_sector_num_per_page, dcm);
 
 			break;
 		default:

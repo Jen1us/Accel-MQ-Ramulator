@@ -166,20 +166,20 @@ namespace SSD_Components
 
 	sim_time_type Queue_Probe::MaxWaitingTime()
 	{
-		return maxWaitingTime / 1000;//convert nano-seconds to micro-seconds
+		return maxWaitingTime / SIM_TIME_TO_MICROSECONDS_COEFF;//convert nano-seconds to micro-seconds
 	}
 
 	sim_time_type Queue_Probe::AvgWaitingTime()
 	{
 		if(nDepartures)
-			return (sim_time_type)((double)totalWaitingTime / (double)(nDepartures * 1000));//convert nano-seconds to micro-seconds
+			return (sim_time_type)((double)totalWaitingTime / (double)(nDepartures * SIM_TIME_TO_MICROSECONDS_COEFF));//convert nano-seconds to micro-seconds
 		return 0;
 	}
 
 	sim_time_type Queue_Probe::AvgWaitingTimeEpoch()
 	{
 		if(nDeparturesEpoch)
-			return (sim_time_type)((double)totalWaitingTimeEpoch / (double)(nDeparturesEpoch * 1000));
+			return (sim_time_type)((double)totalWaitingTimeEpoch / (double)(nDeparturesEpoch * SIM_TIME_TO_MICROSECONDS_COEFF));
 		return 0;
 	}
 
