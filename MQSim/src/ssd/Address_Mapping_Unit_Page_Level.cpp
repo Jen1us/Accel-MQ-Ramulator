@@ -1015,13 +1015,21 @@ namespace SSD_Components
 
 		switch (domain->PlaneAllocationScheme) { 
 			case Flash_Plane_Allocation_Scheme_Type::IDEF:
-				if(transaction->Stream_input_type == 0)
-				// if(lpn < Flash_Parameter_Set::lpn_count_on_SLC)
-					targetAddress.ChannelID = domain->Channel_ids[(unsigned int)(lpn % (int)( domain->Channel_no * Flash_Parameter_Set::SLC_MLC_Ratio ))];
-				else	
-					targetAddress.ChannelID = domain->Channel_ids[(unsigned int)(lpn % (int)( domain->Channel_no - domain->Channel_no * Flash_Parameter_Set::SLC_MLC_Ratio )
-					 + (int)( domain->Channel_no * Flash_Parameter_Set::SLC_MLC_Ratio ))];
-				if(DEBUG1) std::cout<< "LPN -> Channel:"<<lpn<<" -> "<<targetAddress.ChannelID <<"\n"; 
+				if(transaction->Stream_input_type != 0)	//在warp处添加上标记，并在此处检查
+				//if(lpn < Flash_Parameter_Set::lpn_count_on_SLC)
+				{
+					unsigned int slc_channels = (unsigned int)(domain->Channel_no * Flash_Parameter_Set::SLC_MLC_Ratio);
+					unsigned int mlc_channels = domain->Channel_no - slc_channels;
+					if(transaction->Stream_input_type == 1){
+						targetAddress.ChannelID = domain->Channel_ids[(unsigned int)(lpn % slc_channels)];
+					}
+					else{
+						targetAddress.ChannelID = domain->Channel_ids[(unsigned int)(lpn % mlc_channels) + slc_channels];
+					}
+					break;
+				}
+				//else: 继续执行 按CWDP分配
+				if(DEBUG1) std::cout<< "LPN -> Channel:"<<lpn<<" st="<<transaction->Stream_input_type<<" -> "<<targetAddress.ChannelID <<"\n"; 
 				 
 			case Flash_Plane_Allocation_Scheme_Type::CWDP:
 				targetAddress.ChannelID = domain->Channel_ids[(unsigned int)(lpn % domain->Channel_no)];

@@ -8,9 +8,16 @@
 #include <vector>
 
 #include "exec/Execution_Parameter_Set.h"
+#include "exec/Flash_Parameter_Set.h"
 #include "nvm_chip/flash_memory/Flash_Chip.h"
 #include "nvm_chip/flash_memory/Physical_Page_Address.h"
 #include "sim/Engine.h"
+#include "ssd/SSD_Device.h"
+#include "ssd/Address_Mapping_Unit_Page_Level.h"
+#include "ssd/Data_Cache_Manager_Flash_Simple.h"
+#include "ssd/FTL.h"
+#include "ssd/Flash_Block_Manager.h"
+#include "ssd/GC_and_WL_Unit_Page_Level.h"
 #include "ssd/NVM_PHY_ONFI_NVDDR2.h"
 #include "ssd/NVM_Transaction_Flash_ER.h"
 #include "ssd/NVM_Transaction_Flash_RD.h"
@@ -18,7 +25,9 @@
 #include "ssd/ONFI_Channel_NVDDR2.h"
 #include "ssd/SSD_Defs.h"
 #include "ssd/TSU_Base.h"
+#include "ssd/TSU_OutofOrder.h"
 #include "ssd/User_Request.h"
+#include "utils/Logical_Address_Partitioning_Unit.h"
 #include "utils/rapidxml/rapidxml.hpp"
 
 // NOTE: This struct is part of the wrapper's C-ABI surface (used via dlsym).
@@ -45,6 +54,7 @@ struct mq_create_params_t {
 };
 
 namespace {
+class SSD_Device;
 
 struct mq_completion_t {
   void* user_ptr;
@@ -57,6 +67,7 @@ struct mq_pending_req_t {
   uint32_t size_bytes;
   int is_write;
   int source_id;
+  int HBF_Stream_input_type;  //0 means default, 1 -> SLC, 2 -> MLC;
   void* user_ptr;
 };
 
@@ -193,11 +204,22 @@ struct mq_handle_t {
   unsigned page_no_per_block = 0;
   unsigned page_size_bytes = 0;
 
-  // Simulator objects
-  std::vector<std::vector<NVM::FlashMemory::Flash_Chip*>> chips;
-  std::vector<SSD_Components::ONFI_Channel_NVDDR2*> channels;
-  SSD_Components::NVM_PHY_ONFI_NVDDR2* phy = nullptr;
-  TSU_HBF_Simple* tsu = nullptr;
+  // // Flash device stack used by wrapper.
+  // std::vector<std::vector<NVM::FlashMemory::Flash_Chip*>> chips;
+  // std::vector<SSD_Components::ONFI_Channel_NVDDR2*> channels;
+  // SSD_Components::NVM_PHY_ONFI_NVDDR2* phy = nullptr;
+  // SSD_Components::FTL* ftl = nullptr;
+  // SSD_Components::TSU_Base* tsu = nullptr;
+  // SSD_Components::Flash_Block_Manager_Base* fbm = nullptr;
+  // SSD_Components::Address_Mapping_Unit_Base* amu = nullptr;
+  // SSD_Components::GC_and_WL_Unit_Base* gcwl = nullptr;
+  // SSD_Components::Data_Cache_Manager_Base* dcm = nullptr;
+
+  // // Full MQSim device stack (Host_Interface → FTL → AMU → TSU/PHY).
+  // // When this pointer is non-null, requests are injected via the standard
+  // // Host/IO_Flow/FTL path instead of the legacy direct path above.
+  // SSD_Device* full_device = nullptr;
+  SSD_Device* ssd = nullptr;
 
   uint64_t now_ns = 0;
 
@@ -275,7 +297,8 @@ static void tx_serviced_cb(SSD_Components::NVM_Transaction_Flash* tr) {
   // For co-simulation, we use posted-write semantics: the GPU sees a store ACK
   // as soon as the controller accepts the request (handled in mq_tick_to()).
   // Therefore, only READ transactions generate completion notifications here.
-  if (tr->Type == SSD_Components::Transaction_Type::READ) {
+  if (tr->Type == SSD_Components::Transaction_Type::READ &&
+      tr->Source == SSD_Components::Transaction_Source_Type::USERIO) {  //确认？
     g_handle->completions.push_back({user_ptr, Simulator->Time()});
   }
 
@@ -293,20 +316,46 @@ static void tx_serviced_cb(SSD_Components::NVM_Transaction_Flash* tr) {
 static bool parse_mqsim_xml(const char* xml_path) {
   std::ifstream f(xml_path);
   if (!f) return false;
-  std::string xml((std::istreambuf_iterator<char>(f)),
-                  std::istreambuf_iterator<char>());
+  std::string xml((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
   if (xml.empty()) return false;
 
+  // --- 必须补齐的部分：声明 doc 并解析字符串 ---
   rapidxml::xml_document<> doc;
-  // rapidxml requires mutable buffer.
   std::vector<char> buf(xml.begin(), xml.end());
-  buf.push_back('\0');
-  doc.parse<0>(buf.data());
+  buf.push_back('\0'); 
+  try {
+      doc.parse<0>(buf.data());
+  } catch (const std::exception& e) {
+      std::cerr << "XML Parse Error: " << e.what() << std::endl;
+      return false;
+  }
+  // ------------------------------------------
+
   rapidxml::xml_node<>* root = doc.first_node("Execution_Parameter_Set");
   if (!root) return false;
 
+  // 1. 先调用原生的解析（填充全局静态变量，如 Channel_Count, Channel_Transfer_Rate 等）
+  // 注意：MQSim 的 Execution_Parameter_Set 内部通常修改的是静态成员
   Execution_Parameter_Set exec;
   exec.XML_deserialize(root);
+
+  // 2. 找到新增的中间包装节点 <Flash_Parameter_Sets>
+  rapidxml::xml_node<>* device_node = root->first_node("Device_Parameter_Set");
+  if (device_node) {
+      rapidxml::xml_node<>* sets_node = device_node->first_node("Flash_Parameter_Sets");
+      if (sets_node) {
+          // 清空旧数据，防止重复运行导致 map 堆积
+          Flash_Parameter_Set::Flash_Parameter_Sets.clear();
+          // 调用写好的解析函数：它会遍历 sets_node 下的所有 <Flash_Parameter_Set>
+          Flash_Parameter_Set::XML_deserialize(sets_node); 
+      } else {
+          std::cout << "Warning: Could not find <Flash_Parameter_Sets> node! Attempting single node fallback." << std::endl;
+          // 如果 XML 还是老格式，这里可以加一个逻辑去读单个 Flash_Parameter_Set
+      }
+  }
+  
+  std::cout << "Loaded " << Flash_Parameter_Set::Flash_Parameter_Sets.size() << " tech types." << std::endl;
+  
   return true;
 }
 
@@ -315,103 +364,25 @@ static mq_handle_t* build_handle_from_config(const char* xml_path) {
   Device_Parameter_Set* p = &Execution_Parameter_Set::SSD_Device_Configuration;
 
   auto* h = new mq_handle_t;
-  h->channel_count = p->Flash_Channel_Count;
-  h->chip_no_per_channel = p->Chip_No_Per_Channel;
-  h->die_no_per_chip = p->Flash_Parameters.Die_No_Per_Chip;
-  h->plane_no_per_die = p->Flash_Parameters.Plane_No_Per_Die;
-  h->block_no_per_plane = p->Flash_Parameters.Block_No_Per_Plane;
-  h->page_no_per_block = p->Flash_Parameters.Page_No_Per_Block;
-  h->page_size_bytes = p->Flash_Parameters.Page_Capacity;
 
-  // Derive read/program latency tables based on flash technology.
-  sim_time_type* read_latencies = nullptr;
-  sim_time_type* prog_latencies = nullptr;
-  unsigned latency_levels = 1;
-  switch (p->Flash_Parameters.Flash_Technology) {
-    case Flash_Technology_Type::SLC:
-      latency_levels = 1;
-      break;
-    case Flash_Technology_Type::MLC:
-      latency_levels = 2;
-      break;
-    case Flash_Technology_Type::TLC:
-      latency_levels = 3;
-      break;
-    default:
-      latency_levels = 1;
-      break;
-  }
-  read_latencies = new sim_time_type[latency_levels];
-  prog_latencies = new sim_time_type[latency_levels];
-  if (latency_levels == 1) {
-    read_latencies[0] = p->Flash_Parameters.Page_Read_Latency_LSB;
-    prog_latencies[0] = p->Flash_Parameters.Page_Program_Latency_LSB;
-  } else if (latency_levels == 2) {
-    read_latencies[0] = p->Flash_Parameters.Page_Read_Latency_LSB;
-    read_latencies[1] = p->Flash_Parameters.Page_Read_Latency_MSB;
-    prog_latencies[0] = p->Flash_Parameters.Page_Program_Latency_LSB;
-    prog_latencies[1] = p->Flash_Parameters.Page_Program_Latency_MSB;
-  } else {
-    read_latencies[0] = p->Flash_Parameters.Page_Read_Latency_LSB;
-    read_latencies[1] = p->Flash_Parameters.Page_Read_Latency_CSB;
-    read_latencies[2] = p->Flash_Parameters.Page_Read_Latency_MSB;
-    prog_latencies[0] = p->Flash_Parameters.Page_Program_Latency_LSB;
-    prog_latencies[1] = p->Flash_Parameters.Page_Program_Latency_CSB;
-    prog_latencies[2] = p->Flash_Parameters.Page_Program_Latency_MSB;
-  }
+  std::vector<IO_Flow_Parameter_Set*> dummy_flows;
+  IO_Flow_Parameter_Set* gpu_flow = new IO_Flow_Parameter_Set();
+  gpu_flow->Device_Level_Data_Caching_Mode = SSD_Components::Caching_Mode::WRITE_CACHE;
+  gpu_flow->Initial_Occupancy_Percentage = 0; // 空盘开始
+  // 分配所有的 Channel/Chip/Die/Plane 给这个唯一的 GPU Flow
+  gpu_flow->Channel_No = p->Flash_Channel_Count;
+  gpu_flow->Chip_No = p->Chip_No_Per_Channel;
+  gpu_flow->Die_No = p->Flash_Parameters.Die_No_Per_Chip;
+  gpu_flow->Plane_No = p->Flash_Parameters.Plane_No_Per_Die;
+  // ... 将所有 ID 填入 (0, 1, 2...) ...
+  for(int i=0; i<gpu_flow->Channel_No; i++) gpu_flow->Channel_IDs.push_back(i);
+  for(int i=0; i<gpu_flow->Chip_No; i++) gpu_flow->Chip_IDs.push_back(i);
+  for(int i=0; i<gpu_flow->Die_No; i++) gpu_flow->Die_IDs.push_back(i);
+  for(int i=0; i<gpu_flow->Plane_No; i++) gpu_flow->Plane_IDs.push_back(i);
+  
+  dummy_flows.push_back(gpu_flow);
 
-  // Create chips + channels.
-  h->chips.resize(h->channel_count);
-  auto** channels =
-      new SSD_Components::ONFI_Channel_NVDDR2*[h->channel_count];
-
-  for (unsigned ch = 0; ch < h->channel_count; ++ch) {
-    auto** ch_chips = new NVM::FlashMemory::Flash_Chip*[h->chip_no_per_channel];
-    h->chips[ch].resize(h->chip_no_per_channel);
-    for (unsigned chip = 0; chip < h->chip_no_per_channel; ++chip) {
-      auto* c = new NVM::FlashMemory::Flash_Chip(
-          "HBF.Channel." + std::to_string(ch) + ".Chip." + std::to_string(chip),
-          ch, chip, p->Flash_Parameters.Flash_Technology, h->die_no_per_chip,
-          h->plane_no_per_die, h->block_no_per_plane, h->page_no_per_block,
-          read_latencies, prog_latencies, p->Flash_Parameters.Block_Erase_Latency,
-          p->Flash_Parameters.Suspend_Program_Time,
-          p->Flash_Parameters.Suspend_Erase_Time);
-      Simulator->AddObject(c);
-      ch_chips[chip] = c;
-      h->chips[ch][chip] = c;
-    }
-
-    // MQSim expects per-two-unit transfer timing in ns. The stock XML uses a
-    // "transfer rate" number where 333 -> ~6ns (i.e., ~333MB/s with 1B width).
-    // Keep the same convention but avoid integer truncation to 0 for high rates.
-    const double xfer = (p->Channel_Transfer_Rate > 0)
-                            ? (1000.0 / (double)p->Channel_Transfer_Rate)
-                            : 0.0;
-    sim_time_type t_rc = (sim_time_type)(xfer * 2.0);
-    sim_time_type t_dsc = (sim_time_type)(xfer * 2.0);
-    if (t_rc == 0) t_rc = 1;
-    if (t_dsc == 0) t_dsc = 1;
-    channels[ch] = new SSD_Components::ONFI_Channel_NVDDR2(
-        (flash_channel_ID_type)ch, h->chip_no_per_channel, ch_chips,
-        p->Flash_Channel_Width, t_rc, t_dsc);
-    h->channels.push_back(channels[ch]);
-  }
-
-  h->phy = new SSD_Components::NVM_PHY_ONFI_NVDDR2(
-      "HBF.PHY", channels, h->channel_count, h->chip_no_per_channel,
-      h->die_no_per_chip, h->plane_no_per_die);
-  Simulator->AddObject(h->phy);
-
-  h->tsu = new TSU_HBF_Simple("HBF.TSU", h->phy, h->channel_count,
-                             h->chip_no_per_channel, h->die_no_per_chip,
-                             h->plane_no_per_die);
-  Simulator->AddObject(h->tsu);
-
-  // Hook transaction completion notifications for co-simulation.
-  h->phy->ConnectToTransactionServicedSignal(tx_serviced_cb);
-
-  delete[] read_latencies;
-  delete[] prog_latencies;
+  h->ssd = new SSD_Device(p, &dummy_flows);//此处传入ioflow，调用原生SSD初始化过程
 
   return h;
 }
@@ -525,22 +496,28 @@ void mq_destroy(void* handle) {
   g_handle = nullptr;
   Simulator->Reset();
 
-  delete h->tsu;
-  delete h->phy;
-  for (auto* ch : h->channels) delete ch;
-  for (auto& v : h->chips) {
-    for (auto* c : v) delete c;
-  }
+  // delete h->tsu;
+  // delete h->dcm;
+  // delete h->gcwl;
+  // delete h->amu;
+  // delete h->fbm;
+  // delete h->ftl;
+  // delete h->phy;
+  delete h->ssd;
+  // for (auto* ch : h->channels) delete ch;
+  // for (auto& v : h->chips) {
+  //   for (auto* c : v) delete c;
+  // }
   delete h;
 }
 
 int mq_send(void* handle, uint32_t part_id, uint64_t part_addr,
-            uint32_t size_bytes, int is_write, int source_id, void* user_ptr) {
+  uint32_t size_bytes, int is_write, int source_id, int HBF_Stream_input_type, void* user_ptr) {
   auto* h = static_cast<mq_handle_t*>(handle);
   if (!h) return 0;
   if (h->pending.size() >= h->max_pending) return 0;
   h->pending.push_back(
-      {part_id, part_addr, size_bytes, is_write, source_id, user_ptr});
+      {part_id, part_addr, size_bytes, is_write, source_id, HBF_Stream_input_type, user_ptr});
   return 1;
 }
 
@@ -556,57 +533,112 @@ void mq_tick_to(void* handle, uint64_t time_ns) {
 
   if (h->pending.empty()) return;
 
+  std::list<SSD_Components::NVM_Transaction*> transaction_list;
+  auto* ftl = static_cast<SSD_Components::FTL*>(h->ssd->Firmware);
+  auto* amu = ftl->Address_Mapping_Unit;
+
   // Inject all pending requests at this time.
-  h->tsu->Prepare_for_transaction_submit();
+  // h->tsu->Prepare_for_transaction_submit();
+  // for (const auto& preq : h->pending) {
+  //   const uint64_t offset_in_page =
+  //       h->page_size_bytes ? (preq.part_addr % (uint64_t)h->page_size_bytes) : 0;
+  //   const page_status_type bitmap =
+  //       compute_sector_bitmap(h->page_size_bytes, offset_in_page, preq.size_bytes);
+  
+  // 【关键】：在多 LC 架构下，为了保证 LPA 能塞进所有类型的物理页
+  // 全局逻辑页大小必须等于【最小的物理页容量】（即 SLC 的 4096 字节）
+  const uint32_t LOGICAL_PAGE_SIZE = 4096;
   for (const auto& preq : h->pending) {
-    const uint32_t channel_id =
-        h->channel_count ? (preq.part_id % h->channel_count) : 0;
-    const uint64_t offset_in_page =
-        h->page_size_bytes ? (preq.part_addr % (uint64_t)h->page_size_bytes) : 0;
-    const page_status_type bitmap =
-        compute_sector_bitmap(h->page_size_bytes, offset_in_page, preq.size_bytes);
+    // 计算统一标准下的 LPA
+    const LPA_type lpa = (LPA_type)(preq.part_addr / LOGICAL_PAGE_SIZE);
+        
+    // 计算页内扇区偏移和位图
+    const uint64_t offset_in_page = preq.part_addr % LOGICAL_PAGE_SIZE;
+    page_status_type bitmap = compute_sector_bitmap(LOGICAL_PAGE_SIZE, offset_in_page, preq.size_bytes);
 
-    const auto ppa = map_to_ppa(h, channel_id, preq.part_addr);
+    if (preq.is_write) {
+        // 直接生成底层闪存事务，跳过 Cache_Manager
+        auto* tr = new SSD_Components::NVM_Transaction_Flash_WR(
+            SSD_Components::Transaction_Source_Type::USERIO, 
+            0, // Stream_id 对应我们伪造的 flow
+            preq.size_bytes, 
+            lpa, 
+            NO_PPA, // 留给 AMU 去分配
+            nullptr, // 绕过 User_Request
+            0, 
+            nullptr, 
+            bitmap, 
+            Simulator->Time()
+        );
+        
+        // 注入你制定的 SLC/MLC 标记！
+        tr->Stream_input_type = (uint16_t)preq.HBF_Stream_input_type;
+        transaction_list.push_back(tr);
 
-    auto* ur = new SSD_Components::User_Request();
-    ur->IO_command_info = preq.user_ptr;
-    ur->Stream_id = (stream_id_type)(preq.source_id);
-    ur->STAT_InitiationTime = Simulator->Time();
-    ur->Type = preq.is_write ? SSD_Components::UserRequestType::WRITE
-                             : SSD_Components::UserRequestType::READ;
-    ur->Size_in_byte = preq.size_bytes;
-    ur->SizeInSectors =
-        (unsigned int)((preq.size_bytes + SECTOR_SIZE_IN_BYTE - 1) /
-                       SECTOR_SIZE_IN_BYTE);
+        // 提前向 GPU 返回 ACK (Posted Write)，避免流水线堵死
+        h->completions.push_back({preq.user_ptr, Simulator->Time()});
+      }
+    // auto* ur = new SSD_Components::User_Request();
+    // ur->IO_command_info = preq.user_ptr;
+    // ur->Stream_id = (stream_id_type)(preq.source_id);
+    // ur->STAT_InitiationTime = Simulator->Time();
+    // ur->Type = preq.is_write ? SSD_Components::UserRequestType::WRITE
+    //                          : SSD_Components::UserRequestType::READ;
+    // ur->Size_in_byte = preq.size_bytes;
+    // ur->SizeInSectors =
+    //     (unsigned int)((preq.size_bytes + SECTOR_SIZE_IN_BYTE - 1) /
+    //                    SECTOR_SIZE_IN_BYTE);
 
-    const LPA_type lpa = (LPA_type)(preq.part_addr /
-                                    (uint64_t)(h->page_size_bytes
-                                                   ? h->page_size_bytes
-                                                   : SECTOR_SIZE_IN_BYTE));
-    const PPA_type ppa_num = (PPA_type)lpa;
+    // ur->Start_LBA = (LHA_type)(preq.part_addr / SECTOR_SIZE_IN_BYTE);
+    // ur->Stream_input_type = preq.HBF_Stream_input_type;
 
-    if (!preq.is_write) {
+
+    // h->ssd->Cache_manager->Submit_user_request(ur);
+    // const LPA_type lpa = (LPA_type)(preq.part_addr /
+    //                                 (uint64_t)(h->page_size_bytes
+    //                                                ? h->page_size_bytes
+    //                                                : SECTOR_SIZE_IN_BYTE));
+    // const PPA_type ppa_num = NO_PPA;
+
+    // if (!preq.is_write) {
+    //   auto* tr = new SSD_Components::NVM_Transaction_Flash_RD(
+    //       SSD_Components::Transaction_Source_Type::USERIO, ur->Stream_id,
+    //       preq.size_bytes, lpa, ppa_num, ur,
+    //       /*content*/ 0, /*related_write*/ nullptr, bitmap, Simulator->Time());
+    //   tr->Stream_input_type = (uint16_t)preq.HBF_Stream_input_type;
+    //   std::list<SSD_Components::NVM_Transaction*> txs;
+    //   txs.push_back(tr);
+    //   h->amu->Translate_lpa_to_ppa_and_dispatch(txs);
+    // } else {
+    //   auto* tr = new SSD_Components::NVM_Transaction_Flash_WR(
+    //       SSD_Components::Transaction_Source_Type::USERIO, ur->Stream_id,
+    //       preq.size_bytes, lpa, ppa_num, ur,
+    //       /*content*/ 0, /*related_read*/ nullptr, bitmap, Simulator->Time());
+    //   tr->Stream_input_type = (uint16_t)preq.HBF_Stream_input_type;
+    //   std::list<SSD_Components::NVM_Transaction*> txs;
+    //   txs.push_back(tr);
+    //   h->amu->Translate_lpa_to_ppa_and_dispatch(txs);
+    else {
       auto* tr = new SSD_Components::NVM_Transaction_Flash_RD(
-          SSD_Components::Transaction_Source_Type::USERIO, ur->Stream_id,
-          preq.size_bytes, lpa, ppa_num, ppa, ur,
-          /*content*/ 0, /*related_write*/ nullptr, bitmap, Simulator->Time());
-      h->tsu->Submit_transaction(tr);
-    } else {
-      auto* tr = new SSD_Components::NVM_Transaction_Flash_WR(
-          SSD_Components::Transaction_Source_Type::USERIO, ur->Stream_id,
-          preq.size_bytes, lpa, ppa_num, ppa, ur,
-          /*content*/ 0, /*related_read*/ nullptr, bitmap, Simulator->Time());
-      h->tsu->Submit_transaction(tr);
+          SSD_Components::Transaction_Source_Type::USERIO, 
+          0, preq.size_bytes, lpa, NO_PPA, nullptr, 0, nullptr, bitmap, Simulator->Time()
+      );
+      tr->Stream_input_type = (uint16_t)preq.HBF_Stream_input_type;
+      transaction_list.push_back(tr);
+    }
 
-      // Posted write ACK: notify the GPU as soon as the controller accepts the
-      // write. The actual flash program latency is still modeled in MQSim and
-      // will be reflected in later internal contention (die/plane busy), but
-      // it does not block the GPU pipeline.
-      h->completions.push_back({preq.user_ptr, Simulator->Time()});
+    //   // Posted write ACK: notify the GPU as soon as the controller accepts the
+    //   // write. The actual flash program latency is still modeled in MQSim and
+    //   // will be reflected in later internal contention (die/plane busy), but
+    //   // it does not block the GPU pipeline.
+    //   h->completions.push_back({preq.user_ptr, Simulator->Time()});
     }
   }
   h->pending.clear();
-  h->tsu->Schedule();
+
+  // 将请求直接丢给完整的 AMU 进行映射和下发
+  amu->Translate_lpa_to_ppa_and_dispatch(transaction_list);// 唤醒 FTL 下面的调度器
+  ftl->TSU->Schedule();
 
   // Some components may schedule immediate events at the current time.
   Simulator->Run_until(time_ns);
