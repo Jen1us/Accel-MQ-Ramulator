@@ -54,9 +54,11 @@ class memory_config;
 class mem_fetch {
  public:
   enum mem_backend_t {
-    MEM_BACKEND_UNSPECIFIED = 0,
-    MEM_BACKEND_HBM = 1,
-    MEM_BACKEND_HBF = 2
+    MEM_BACKEND_RAMULATOR = 0,
+    MEM_BACKEND_HBM = MEM_BACKEND_RAMULATOR,
+    MEM_BACKEND_MQSIM = 1,
+    MEM_BACKEND_HBF = MEM_BACKEND_MQSIM,
+    MEM_BACKEND_UNSPECIFIED = 2
   };
 
   mem_fetch(const mem_access_t &access, const warp_inst_t *inst,
@@ -136,6 +138,8 @@ class mem_fetch {
   bool has_mem_backend() const {
     return m_mem_backend != MEM_BACKEND_UNSPECIFIED;
   }
+  bool is_ramulator() const { return m_mem_backend == MEM_BACKEND_RAMULATOR; }
+  bool is_mqsim() const { return m_mem_backend == MEM_BACKEND_MQSIM; }
   bool is_hbf() const { return m_mem_backend == MEM_BACKEND_HBF; }
   bool is_hbm() const { return m_mem_backend == MEM_BACKEND_HBM; }
 

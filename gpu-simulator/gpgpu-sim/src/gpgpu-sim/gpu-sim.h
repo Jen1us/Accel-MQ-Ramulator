@@ -37,6 +37,8 @@
 #include <fstream>
 #include <iostream>
 #include <list>
+#include <string>
+#include <vector>
 #include "../abstract_hardware_model.h"
 #include "../option_parser.h"
 #include "../trace.h"
@@ -213,6 +215,19 @@ struct power_config {
 
 class memory_config {
  public:
+  enum external_mem_backend_t {
+    EXTMEM_BACKEND_RAMULATOR = 0,
+    EXTMEM_BACKEND_MQSIM = 1,
+    EXTMEM_BACKEND_UNSPECIFIED = 2
+  };
+
+  struct mem_backend_range {
+    new_addr_type base;
+    new_addr_type end;
+    unsigned backend;
+    std::string label;
+  };
+
   memory_config(gpgpu_context *ctx) {
     m_valid = false;
     gpgpu_dram_timing_opt = NULL;
@@ -245,6 +260,9 @@ class memory_config {
     hbf_request_trace_limit = 0;
     hbf_request_trace_count = 0;
     hbf_request_trace_fp = NULL;
+    mem_backend_map_file = NULL;
+    mem_backend_map_default = NULL;
+    mem_backend_default = EXTMEM_BACKEND_UNSPECIFIED;
 
     // HBF address-range based placement (secondary to hot/cold policies).
     hbf_addr_range_start = 0;
@@ -406,6 +424,17 @@ class memory_config {
               "This overrides HBF partition tagging.\n",
               hbf_random_access_percent, hbf_random_access_seed);
     }
+    mem_backend_default = EXTMEM_BACKEND_UNSPECIFIED;
+    if (mem_backend_map_default && mem_backend_map_default[0] != '\0')
+      mem_backend_default = parse_external_mem_backend(mem_backend_map_default);
+    if (has_mem_backend_map()) {
+      load_mem_backend_map();
+      fprintf(stdout,
+              "External memory backend map enabled: %s (%zu ranges, "
+              "default=%s)\n",
+              mem_backend_map_file, m_mem_backend_ranges.size(),
+              external_mem_backend_name(mem_backend_default));
+    }
     if (hbf_request_trace) {
       hbf_request_trace_open();
       const char *trace_path =
@@ -439,6 +468,17 @@ class memory_config {
            &write_low_watermark);
   }
   void reg_options(class OptionParser *opp);
+  bool has_mem_backend_map() const {
+    return mem_backend_map_file != NULL && mem_backend_map_file[0] != '\0';
+  }
+  unsigned parse_external_mem_backend(const char *name) const;
+  const char *external_mem_backend_name(unsigned backend) const;
+  void load_mem_backend_map();
+  unsigned resolve_mem_backend(new_addr_type addr) const;
+  void assign_mem_backend(mem_fetch *mf) const;
+  void require_valid_mem_backend(const mem_fetch *mf,
+                                 const char *where) const;
+  bool uses_mqsim_for_any_request() const;
   bool is_hbf_partition(unsigned partition_id) const {
     if (hbf_partition_count == 0) return false;
     return (partition_id >= hbf_partition_start) &&
@@ -476,7 +516,6 @@ class memory_config {
   }
   void hbf_request_trace_open() const;
   void hbf_request_trace_log(const mem_fetch *mf, unsigned partition_id,
-                             bool is_hbf,
                              unsigned long long cycle) const;
 
   /**
@@ -509,6 +548,10 @@ class memory_config {
   unsigned hbf_request_trace_limit;
   mutable unsigned long long hbf_request_trace_count;
   mutable FILE *hbf_request_trace_fp;
+  char *mem_backend_map_file;
+  char *mem_backend_map_default;
+  unsigned mem_backend_default;
+  std::vector<mem_backend_range> m_mem_backend_ranges;
   new_addr_type hbf_addr_range_start;
   new_addr_type hbf_addr_range_size;
   unsigned m_n_sub_partition_per_memory_channel;
@@ -649,9 +692,7 @@ class gpgpu_sim_config : public power_config,
     // with an auto mode that scales up when HBF is enabled.
     if (gpu_deadlock_detect_interval == 0) {
       gpu_deadlock_detect_interval = 50000;
-      const bool hbf_enabled = m_memory_config.hbf_random_access ||
-                               (m_memory_config.hbf_partition_count > 0) ||
-                               (m_memory_config.hbf_addr_range_size != 0);
+      const bool hbf_enabled = m_memory_config.uses_mqsim_for_any_request();
       if (hbf_enabled) {
         const unsigned subpage_bytes =
             m_memory_config.hbf_subpage_bytes ? m_memory_config.hbf_subpage_bytes

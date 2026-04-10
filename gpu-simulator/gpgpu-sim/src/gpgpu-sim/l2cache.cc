@@ -314,10 +314,10 @@ void memory_partition_unit::simple_dram_model_cycle() {
     if (!m_sub_partition[spid]->L2_dram_queue_empty() &&
         can_issue_to_dram(spid)) {
       mem_fetch *mf = m_sub_partition[spid]->L2_dram_queue_top();
-      bool is_hbf =
-          m_config->is_hbf_request(mf->get_request_uid(), mf->get_addr(), m_id);
-      mf->set_mem_backend(is_hbf ? mem_fetch::MEM_BACKEND_HBF
-                                 : mem_fetch::MEM_BACKEND_HBM);
+      m_config->assign_mem_backend(mf);
+      m_config->require_valid_mem_backend(
+          mf, "memory_partition_unit::simple_dram_model_cycle");
+      bool is_hbf = mf->is_hbf();
       if (is_hbf) {
         if (m_hbf->full(mf->is_write())) break;
       } else {
@@ -334,7 +334,7 @@ void memory_partition_unit::simple_dram_model_cycle() {
         m_hbf_issued_to_hbf++;
       else
         m_hbm_issued_to_dram++;
-      m_config->hbf_request_trace_log(mf, m_id, is_hbf, cycle);
+      m_config->hbf_request_trace_log(mf, m_id, cycle);
       if (is_hbf) {
         hbf_delay_t d;
         d.req = mf;
@@ -424,10 +424,10 @@ void memory_partition_unit::dram_cycle() {
     if (!m_sub_partition[spid]->L2_dram_queue_empty() &&
         can_issue_to_dram(spid)) {
       mem_fetch *mf = m_sub_partition[spid]->L2_dram_queue_top();
-      bool is_hbf =
-          m_config->is_hbf_request(mf->get_request_uid(), mf->get_addr(), m_id);
-      mf->set_mem_backend(is_hbf ? mem_fetch::MEM_BACKEND_HBF
-                                 : mem_fetch::MEM_BACKEND_HBM);
+      m_config->assign_mem_backend(mf);
+      m_config->require_valid_mem_backend(mf,
+                                          "memory_partition_unit::dram_cycle");
+      bool is_hbf = mf->is_hbf();
       if (is_hbf) {
         if (m_hbf->full(mf->is_write())) break;
       } else {
@@ -444,7 +444,7 @@ void memory_partition_unit::dram_cycle() {
         m_hbf_issued_to_hbf++;
       else
         m_hbm_issued_to_dram++;
-      m_config->hbf_request_trace_log(mf, m_id, is_hbf, cycle);
+      m_config->hbf_request_trace_log(mf, m_id, cycle);
       if (is_hbf) {
         hbf_delay_t d;
         d.req = mf;
@@ -945,6 +945,7 @@ void memory_sub_partition::push(mem_fetch *m_req, unsigned long long cycle) {
     for (unsigned i = 0; i < reqs.size(); ++i) {
       mem_fetch *req = reqs[i];
       m_request_tracker.insert(req);
+      m_config->assign_mem_backend(req);
       if (req->istexture()) {
         m_icnt_L2_queue->push(req);
         req->set_status(IN_PARTITION_ICNT_TO_L2_QUEUE,
@@ -952,13 +953,8 @@ void memory_sub_partition::push(mem_fetch *m_req, unsigned long long cycle) {
       } else {
         rop_delay_t r;
         r.req = req;
-        unsigned partition_id =
-            m_id / m_config->m_n_sub_partition_per_memory_channel;
         unsigned rop_latency =
-            m_config->is_hbf_request(req->get_request_uid(), req->get_addr(),
-                                     partition_id)
-                ? m_config->hbf_rop_latency
-                : m_config->rop_latency;
+            req->is_hbf() ? m_config->hbf_rop_latency : m_config->rop_latency;
         r.ready_cycle = cycle + rop_latency;
         m_rop.push(r);
         req->set_status(IN_PARTITION_ROP_DELAY,
