@@ -32,6 +32,8 @@
 
 #include "gpu-sim.h"
 
+#include <algorithm>
+#include <cctype>
 #include <math.h>
 #include <signal.h>
 #include <stdio.h>
@@ -87,6 +89,24 @@ class gpgpu_sim_wrapper {};
 bool g_interactive_debugger_enabled = false;
 
 tr1_hash_map<new_addr_type, unsigned> address_random_interleaving;
+
+namespace {
+
+std::string trim_copy(const std::string &input) {
+  std::string::size_type begin = 0;
+  while (begin < input.size() &&
+         std::isspace(static_cast<unsigned char>(input[begin])))
+    begin++;
+
+  std::string::size_type end = input.size();
+  while (end > begin &&
+         std::isspace(static_cast<unsigned char>(input[end - 1])))
+    end--;
+
+  return input.substr(begin, end - begin);
+}
+
+}  // namespace
 
 /* Clock Domains */
 
@@ -297,6 +317,16 @@ void memory_config::reg_options(class OptionParser *opp) {
       "max number of requests to write to -hbf_request_trace_file (0 = no "
       "limit)",
       "0");
+  option_parser_register(
+      opp, "-mem_backend_map_file", OPT_CSTR, &mem_backend_map_file,
+      "Path to a VA-range to external backend map file "
+      "(base size backend [label])",
+      "");
+  option_parser_register(
+      opp, "-mem_backend_map_default", OPT_CSTR, &mem_backend_map_default,
+      "Default backend when -mem_backend_map_file has no matching range "
+      "(ramulator|mqsim|unspecified)",
+      "unspecified");
 
   // HBF (Flash) geometry/timing parameters.
   option_parser_register(opp, "-hbf_page_bytes", OPT_UINT32, &hbf_page_bytes,
@@ -444,6 +474,202 @@ void memory_config::reg_options(class OptionParser *opp) {
   m_address_mapping.addrdec_setoption(opp);
 }
 
+unsigned memory_config::parse_external_mem_backend(const char *name) const {
+  std::string normalized = trim_copy(name ? name : "");
+  std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                 [](unsigned char c) { return std::tolower(c); });
+
+  if (normalized.empty() || normalized == "unspecified" ||
+      normalized == "none" || normalized == "2")
+    return EXTMEM_BACKEND_UNSPECIFIED;
+  if (normalized == "ramulator" || normalized == "ramulator2" ||
+      normalized == "hbm" || normalized == "0")
+    return EXTMEM_BACKEND_RAMULATOR;
+  if (normalized == "mqsim" || normalized == "hbf" ||
+      normalized == "flash" || normalized == "1")
+    return EXTMEM_BACKEND_MQSIM;
+
+  fprintf(stderr,
+          "FATAL: unknown external memory backend '%s' "
+          "(expected ramulator/mqsim/unspecified or 0/1/2)\n",
+          name ? name : "(null)");
+  abort();
+}
+
+const char *memory_config::external_mem_backend_name(unsigned backend) const {
+  switch (backend) {
+    case EXTMEM_BACKEND_RAMULATOR:
+      return "RAMULATOR";
+    case EXTMEM_BACKEND_MQSIM:
+      return "MQSIM";
+    case EXTMEM_BACKEND_UNSPECIFIED:
+      return "UNSPECIFIED";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+void memory_config::load_mem_backend_map() {
+  m_mem_backend_ranges.clear();
+  if (!has_mem_backend_map()) return;
+
+  FILE *fp = fopen(mem_backend_map_file, "r");
+  if (!fp) {
+    fprintf(stderr, "FATAL: failed to open mem backend map '%s': %s\n",
+            mem_backend_map_file, strerror(errno));
+    abort();
+  }
+
+  char line_buf[4096];
+  unsigned line_no = 0;
+  while (fgets(line_buf, sizeof(line_buf), fp) != NULL) {
+    line_no++;
+    std::string line = trim_copy(line_buf);
+    if (line.empty() || line[0] == '#') continue;
+
+    std::istringstream iss(line);
+    std::string base_str;
+    std::string size_str;
+    std::string backend_str;
+    if (!(iss >> base_str >> size_str >> backend_str)) {
+      fprintf(stderr,
+              "FATAL: malformed mem backend map line %u in '%s': "
+              "expected 'base size backend [label]'\n",
+              line_no, mem_backend_map_file);
+      abort();
+    }
+
+    char *base_end = NULL;
+    char *size_end = NULL;
+    errno = 0;
+    unsigned long long base =
+        strtoull(base_str.c_str(), &base_end, 0);
+    if (errno != 0 || base_end == NULL || *base_end != '\0') {
+      fprintf(stderr,
+              "FATAL: invalid base '%s' at line %u in '%s'\n",
+              base_str.c_str(), line_no, mem_backend_map_file);
+      abort();
+    }
+
+    errno = 0;
+    unsigned long long size =
+        strtoull(size_str.c_str(), &size_end, 0);
+    if (errno != 0 || size_end == NULL || *size_end != '\0' || size == 0) {
+      fprintf(stderr,
+              "FATAL: invalid size '%s' at line %u in '%s'\n",
+              size_str.c_str(), line_no, mem_backend_map_file);
+      abort();
+    }
+
+    const unsigned long long end = base + size;
+    if (end <= base) {
+      fprintf(stderr,
+              "FATAL: overflow in mem backend map line %u in '%s'\n", line_no,
+              mem_backend_map_file);
+      abort();
+    }
+
+    mem_backend_range range;
+    range.base = static_cast<new_addr_type>(base);
+    range.end = static_cast<new_addr_type>(end);
+    range.backend = parse_external_mem_backend(backend_str.c_str());
+
+    std::string label;
+    std::getline(iss, label);
+    range.label = trim_copy(label);
+    m_mem_backend_ranges.push_back(range);
+  }
+
+  fclose(fp);
+
+  std::sort(m_mem_backend_ranges.begin(), m_mem_backend_ranges.end(),
+            [](const mem_backend_range &lhs, const mem_backend_range &rhs) {
+              if (lhs.base != rhs.base) return lhs.base < rhs.base;
+              return lhs.end < rhs.end;
+            });
+
+  for (size_t i = 1; i < m_mem_backend_ranges.size(); ++i) {
+    const mem_backend_range &prev = m_mem_backend_ranges[i - 1];
+    const mem_backend_range &curr = m_mem_backend_ranges[i];
+    if (prev.end > curr.base) {
+      fprintf(stderr,
+              "FATAL: overlapping mem backend map ranges in '%s': "
+              "[0x%llx, 0x%llx) and [0x%llx, 0x%llx)\n",
+              mem_backend_map_file, (unsigned long long)prev.base,
+              (unsigned long long)prev.end, (unsigned long long)curr.base,
+              (unsigned long long)curr.end);
+      abort();
+    }
+  }
+}
+
+unsigned memory_config::resolve_mem_backend(new_addr_type addr) const {
+  if (!has_mem_backend_map()) return EXTMEM_BACKEND_UNSPECIFIED;
+
+  for (size_t i = 0; i < m_mem_backend_ranges.size(); ++i) {
+    const mem_backend_range &range = m_mem_backend_ranges[i];
+    if (addr >= range.base && addr < range.end) return range.backend;
+  }
+
+  return mem_backend_default;
+}
+
+void memory_config::assign_mem_backend(mem_fetch *mf) const {
+  if (!mf || mf->has_mem_backend()) return;
+
+  unsigned backend = EXTMEM_BACKEND_UNSPECIFIED;
+  if (has_mem_backend_map()) {
+    backend = resolve_mem_backend(mf->get_addr());
+  } else {
+    unsigned partition_id = 0;
+    if (!is_SST_mode()) partition_id = mf->get_tlx_addr().chip;
+    backend = is_hbf_request(mf->get_request_uid(), mf->get_addr(),
+                             partition_id)
+                  ? EXTMEM_BACKEND_MQSIM
+                  : EXTMEM_BACKEND_RAMULATOR;
+  }
+
+  mf->set_mem_backend(static_cast<mem_fetch::mem_backend_t>(backend));
+}
+
+void memory_config::require_valid_mem_backend(const mem_fetch *mf,
+                                              const char *where) const {
+  if (mf != NULL && mf->has_mem_backend()) return;
+
+  fprintf(stderr,
+          "FATAL: off-chip mem_fetch without resolved backend at %s",
+          where ? where : "(unknown)");
+  if (mf != NULL) {
+    fprintf(stderr, " uid=%u addr=0x%llx access_type=%u", mf->get_request_uid(),
+            (unsigned long long)mf->get_addr(),
+            (unsigned)mf->get_access_type());
+  }
+  if (has_mem_backend_map()) {
+    fprintf(stderr, " map=%s default=%s", mem_backend_map_file,
+            external_mem_backend_name(mem_backend_default));
+  }
+  fprintf(stderr, "\n");
+  if (mf != NULL) {
+    fprintf(stderr, "Unresolved mem_fetch details:\n");
+    mf->print(stderr);
+  }
+  abort();
+}
+
+bool memory_config::uses_mqsim_for_any_request() const {
+  if (has_mem_backend_map()) {
+    if (mem_backend_default == EXTMEM_BACKEND_MQSIM) return true;
+    for (size_t i = 0; i < m_mem_backend_ranges.size(); ++i) {
+      if (m_mem_backend_ranges[i].backend == EXTMEM_BACKEND_MQSIM) return true;
+    }
+    return false;
+  }
+
+  if (hbf_random_access) return hbf_random_access_percent != 0;
+  if (hbf_addr_range_size != 0) return true;
+  return hbf_partition_count > 0;
+}
+
 void memory_config::hbf_request_trace_open() const {
   if (!hbf_request_trace) return;
   if (hbf_request_trace_fp) return;
@@ -459,12 +685,13 @@ void memory_config::hbf_request_trace_open() const {
 
   hbf_request_trace_count = 0;
   fprintf(hbf_request_trace_fp,
-          "cycle,uid,partition,subpartition,addr,is_write,access_type,tag\n");
+          "cycle,uid,partition,subpartition,addr,is_write,access_type,"
+          "backend,compat_tag\n");
   fflush(hbf_request_trace_fp);
 }
 
 void memory_config::hbf_request_trace_log(const mem_fetch *mf,
-                                         unsigned partition_id, bool is_hbf,
+                                         unsigned partition_id,
                                          unsigned long long cycle) const {
   if (!hbf_request_trace) return;
   if (!mf) return;
@@ -474,11 +701,13 @@ void memory_config::hbf_request_trace_log(const mem_fetch *mf,
       hbf_request_trace_count >= hbf_request_trace_limit)
     return;
 
-  const char *tag = is_hbf ? "HBF" : "HBM";
-  fprintf(hbf_request_trace_fp, "%llu,%u,%u,%u,0x%llx,%u,%u,%s\n", cycle,
+  const char *backend = external_mem_backend_name(mf->get_mem_backend());
+  const char *compat_tag =
+      mf->is_hbf() ? "HBF" : (mf->is_hbm() ? "HBM" : "UNSPECIFIED");
+  fprintf(hbf_request_trace_fp, "%llu,%u,%u,%u,0x%llx,%u,%u,%s,%s\n", cycle,
           mf->get_request_uid(), partition_id, mf->get_sub_partition_id(),
           (unsigned long long)mf->get_addr(), mf->get_is_write() ? 1 : 0,
-          (unsigned)mf->get_access_type(), tag);
+          (unsigned)mf->get_access_type(), backend, compat_tag);
   hbf_request_trace_count++;
 }
 

@@ -75,7 +75,13 @@ mem_fetch::mem_fetch(const mem_access_t &access, const warp_inst_t *inst,
   if (m_original_mf) {
     m_raw_addr.chip = m_original_mf->get_tlx_addr().chip;
     m_raw_addr.sub_partition = m_original_mf->get_tlx_addr().sub_partition;
+  }
+  if (m_original_mf && m_original_mf->has_mem_backend()) {
     m_mem_backend = m_original_mf->get_mem_backend();
+  } else if (m_original_wr_mf && m_original_wr_mf->has_mem_backend()) {
+    m_mem_backend = m_original_wr_mf->get_mem_backend();
+  } else if (config) {
+    config->assign_mem_backend(this);
   }
 }
 
@@ -99,6 +105,12 @@ void mem_fetch::print(FILE *fp, bool print_inst) const {
   fprintf(fp, "  mf: uid=%6u, sid%02u:w%02u, part=%u, ", m_request_uid, m_sid,
           m_wid, m_raw_addr.chip);
   m_access.print(fp);
+  const char *backend = "UNSPECIFIED";
+  if (is_ramulator())
+    backend = "RAMULATOR";
+  else if (is_mqsim())
+    backend = "MQSIM";
+  fprintf(fp, " backend=%s,", backend);
   if ((unsigned)m_status < NUM_MEM_REQ_STAT)
     fprintf(fp, " status = %s (%llu), ", Status_str[m_status], m_status_change);
   else
