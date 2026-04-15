@@ -183,6 +183,9 @@ void Device_Parameter_Set::XML_serialize(Utils::XmlWriter& xmlwriter)
 
 	attr = "Plane_Allocation_Scheme";
 	switch (Plane_Allocation_Scheme) {
+		case SSD_Components::Flash_Plane_Allocation_Scheme_Type::IDEF:
+			val = "IDEF";
+			break;
 		case SSD_Components::Flash_Plane_Allocation_Scheme_Type::CDPW:
 			val = "CDPW";
 			break;
@@ -486,7 +489,9 @@ void Device_Parameter_Set::XML_deserialize(rapidxml::xml_node<> *node)
 			} else if (strcmp(param->name(), "Plane_Allocation_Scheme") == 0) {
 				std::string val = param->value();
 				std::transform(val.begin(), val.end(), val.begin(), ::toupper);
-				if (strcmp(val.c_str(), "CDPW") == 0) {
+				if (strcmp(val.c_str(), "IDEF") == 0) {
+					Plane_Allocation_Scheme = SSD_Components::Flash_Plane_Allocation_Scheme_Type::IDEF;
+				} else if (strcmp(val.c_str(), "CDPW") == 0) {
 					Plane_Allocation_Scheme = SSD_Components::Flash_Plane_Allocation_Scheme_Type::CDPW;
 				} else if (strcmp(val.c_str(), "CDWP") == 0) {
 					Plane_Allocation_Scheme = SSD_Components::Flash_Plane_Allocation_Scheme_Type::CDWP;

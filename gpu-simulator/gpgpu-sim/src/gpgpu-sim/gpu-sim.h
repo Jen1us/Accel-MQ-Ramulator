@@ -475,6 +475,7 @@ class memory_config {
   const char *external_mem_backend_name(unsigned backend) const;
   void load_mem_backend_map();
   unsigned resolve_mem_backend(new_addr_type addr) const;
+  std::string resolve_mem_backend_label(new_addr_type addr) const;
   void assign_mem_backend(mem_fetch *mf) const;
   void require_valid_mem_backend(const mem_fetch *mf,
                                  const char *where) const;

@@ -135,6 +135,8 @@ class mem_fetch {
 
   void set_mem_backend(mem_backend_t backend) { m_mem_backend = backend; }
   mem_backend_t get_mem_backend() const { return m_mem_backend; }
+  void set_stream_type(int type) { m_stream_type = type; }
+  int get_stream_type() const { return m_stream_type; }
   bool has_mem_backend() const {
     return m_mem_backend != MEM_BACKEND_UNSPECIFIED;
   }
@@ -190,6 +192,7 @@ class mem_fetch {
   const memory_config *m_mem_config;
   unsigned icnt_flit_size;
   mem_backend_t m_mem_backend;
+  int m_stream_type{0};
 
   mem_fetch
       *original_mf;  // this pointer is set up when a request is divided into

@@ -56,6 +56,10 @@ public:
 
 	void Submit_transaction(NVM_Transaction_Flash *transaction)
 	{
+		if (std::getenv("ACCEL_HBF_STREAM_DEBUG")) {
+			fprintf(stdout, "[AMU_DEBUG] Push tr submitted to TSU: LPA=%llu\n", 
+				transaction->LPA);
+		}
 		transaction_receive_slots.push_back(transaction);
 	}
 

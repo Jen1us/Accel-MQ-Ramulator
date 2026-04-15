@@ -325,6 +325,31 @@ void Flash_Parameter_Set::XML_deserialize(rapidxml::xml_node<> *parent_node)
 		} 
 		
 		select_configuration(Flash_Technology_Type::MLC);
+		// Multi-set path only filled Flash_Parameter_Sets + current_params.  SSD_Device and
+		// other code still read the legacy static members (e.g. CMD_Suspension_Support) via
+		// Device_Parameter_Set::Flash_Parameters — sync them from the selected tech so TSU
+		// gets correct program/erase suspension flags (e.g. PROGRAM_ERASE from XML).
+		if (current_params != nullptr) {
+			const Flash_Params& p = *current_params;
+			Flash_Technology = p.Flash_Technology;
+			CMD_Suspension_Support = p.CMD_Suspension_Support;
+			Page_Read_Latency_LSB = p.Page_Read_Latency_LSB;
+			Page_Read_Latency_CSB = p.Page_Read_Latency_CSB;
+			Page_Read_Latency_MSB = p.Page_Read_Latency_MSB;
+			Page_Program_Latency_LSB = p.Page_Program_Latency_LSB;
+			Page_Program_Latency_CSB = p.Page_Program_Latency_CSB;
+			Page_Program_Latency_MSB = p.Page_Program_Latency_MSB;
+			Block_Erase_Latency = p.Block_Erase_Latency;
+			Block_PE_Cycles_Limit = p.Block_PE_Cycles_Limit;
+			Suspend_Erase_Time = p.Suspend_Erase_Time;
+			Suspend_Program_Time = p.Suspend_Program_Time;
+			Die_No_Per_Chip = p.Die_No_Per_Chip;
+			Plane_No_Per_Die = p.Plane_No_Per_Die;
+			Block_No_Per_Plane = p.Block_No_Per_Plane;
+			Page_No_Per_Block = p.Page_No_Per_Block;
+			Page_Capacity = p.Page_Capacity;
+			Page_Metadat_Capacity = p.Page_Metadat_Capacity;
+		}
 		}
 		catch (...) {
 			PRINT_ERROR("Error in the Flash_Parameter_Set!")

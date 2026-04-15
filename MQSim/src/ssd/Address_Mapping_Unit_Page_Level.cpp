@@ -6,7 +6,6 @@
 #include "Stats.h"
 #include "../utils/Logical_Address_Partitioning_Unit.h"
 #include "../exec/Flash_Parameter_Set.h"
-#define DEBUG1 true
 
 namespace SSD_Components
 {
@@ -522,11 +521,18 @@ namespace SSD_Components
 	bool Address_Mapping_Unit_Page_Level::query_cmt(NVM_Transaction_Flash* transaction)
 	{
 		stream_id_type stream_id = transaction->Stream_id;
+	const bool debug_trace = std::getenv("ACCEL_HBF_STREAM_DEBUG") != nullptr;
+	const bool is_user_write = transaction->Source == Transaction_Source_Type::USERIO &&
+		transaction->Type == Transaction_Type::WRITE;
 		Stats::total_CMT_queries++;
 		Stats::total_CMT_queries_per_stream[stream_id]++;
 
 		if (domains[stream_id]->Mapping_entry_accessible(ideal_mapping_table, stream_id, transaction->LPA))//Either limited or unlimited CMT
 		{
+		if (debug_trace && is_user_write) {
+			fprintf(stdout, "AMU_TRACE stage=query_cmt event=hit lpa=%llu\n",
+				(unsigned long long)transaction->LPA);
+		}
 			Stats::CMT_hits_per_stream[stream_id]++;
 			Stats::CMT_hits++;
 			if (transaction->Type == Transaction_Type::READ) {
@@ -543,14 +549,27 @@ namespace SSD_Components
 			}
 
 			if (translate_lpa_to_ppa(stream_id, transaction)) {
+				if (debug_trace && is_user_write) {
+					fprintf(stdout, "AMU_TRACE stage=query_cmt event=translate_ok lpa=%llu\n",
+						(unsigned long long)transaction->LPA);
+				}
 				return true;
 			} else {
+				if (debug_trace && is_user_write) {
+					fprintf(stdout, "AMU_TRACE stage=query_cmt event=translate_fail lpa=%llu\n",
+						(unsigned long long)transaction->LPA);
+				}
 				mange_unsuccessful_translation(transaction);
 				return false;
 			}
 		} else {//Limited CMT
 			//Maybe we can catch mapping data from an on-the-fly write back request
 			if (request_mapping_entry(stream_id, transaction->LPA)) {
+				if (debug_trace && is_user_write) {
+					fprintf(stdout,
+						"AMU_TRACE stage=query_cmt event=miss_request_mapping_ready lpa=%llu\n",
+						(unsigned long long)transaction->LPA);
+				}
 				Stats::CMT_miss++;
 				Stats::CMT_miss_per_stream[stream_id]++;
 				if (transaction->Type == Transaction_Type::READ) {
@@ -565,8 +584,16 @@ namespace SSD_Components
 					Stats::writeTR_CMT_miss_per_stream[stream_id]++;
 				}
 				if (translate_lpa_to_ppa(stream_id, transaction)) {
+					if (debug_trace && is_user_write) {
+						fprintf(stdout, "AMU_TRACE stage=query_cmt event=translate_ok_after_miss lpa=%llu\n",
+							(unsigned long long)transaction->LPA);
+					}
 					return true;
 				} else {
+					if (debug_trace && is_user_write) {
+						fprintf(stdout, "AMU_TRACE stage=query_cmt event=translate_fail_after_miss lpa=%llu\n",
+							(unsigned long long)transaction->LPA);
+					}
 					mange_unsuccessful_translation(transaction);
 					return false;
 				}
@@ -583,6 +610,12 @@ namespace SSD_Components
 					Stats::writeTR_CMT_miss++;
 					Stats::writeTR_CMT_miss_per_stream[stream_id]++;
 					domains[stream_id]->Waiting_unmapped_program_transactions.insert(std::pair<LPA_type, NVM_Transaction_Flash*>(transaction->LPA, transaction));
+					if (debug_trace && is_user_write) {
+						fprintf(stdout,
+							"AMU_TRACE stage=query_cmt event=queued_waiting_unmapped_program lpa=%llu waiting_size=%zu\n",
+							(unsigned long long)transaction->LPA,
+							(size_t)domains[stream_id]->Waiting_unmapped_program_transactions.size());
+					}
 				}
 			}
 
@@ -1012,25 +1045,37 @@ namespace SSD_Components
 		LPA_type lpn = transaction->LPA;
 		NVM::FlashMemory::Physical_Page_Address& targetAddress = transaction->Address;
 		AddressMappingDomain* domain = domains[transaction->Stream_id];
-
 		switch (domain->PlaneAllocationScheme) { 
 			case Flash_Plane_Allocation_Scheme_Type::IDEF:
-				if(transaction->Stream_input_type != 0)	//在warp处添加上标记，并在此处检查
+				if(transaction->Stream_input_type != 2)	//在warp处添加上标记，并在此处检查
 				//if(lpn < Flash_Parameter_Set::lpn_count_on_SLC)
 				{
 					unsigned int slc_channels = (unsigned int)(domain->Channel_no * Flash_Parameter_Set::SLC_MLC_Ratio);
 					unsigned int mlc_channels = domain->Channel_no - slc_channels;
-					if(transaction->Stream_input_type == 1){
+					unsigned int LC_channel_no;
+					if(transaction->Stream_input_type == 0){
+						LC_channel_no = slc_channels;
 						targetAddress.ChannelID = domain->Channel_ids[(unsigned int)(lpn % slc_channels)];
 					}
 					else{
+						LC_channel_no = mlc_channels;
 						targetAddress.ChannelID = domain->Channel_ids[(unsigned int)(lpn % mlc_channels) + slc_channels];
+					}
+					targetAddress.ChipID = domain->Chip_ids[(unsigned int)((lpn / LC_channel_no) % domain->Chip_no)];
+					targetAddress.DieID = domain->Die_ids[(unsigned int)((lpn / (domain->Chip_no * LC_channel_no)) % domain->Die_no)];
+					targetAddress.PlaneID = domain->Plane_ids[(unsigned int)((lpn / (domain->Die_no * domain->Chip_no * LC_channel_no)) % domain->Plane_no)];
+					
+					if (transaction->Source == Transaction_Source_Type::USERIO &&
+						std::getenv("ACCEL_HBF_STREAM_DEBUG")) {
+						fprintf(stdout,
+								"AMU_USER_MAP lpn=%llu tag=%d channel=%u\n",
+								(unsigned long long)lpn, transaction->Stream_input_type,
+								targetAddress.ChannelID);
 					}
 					break;
 				}
-				//else: 继续执行 按CWDP分配
-				if(DEBUG1) std::cout<< "LPN -> Channel:"<<lpn<<" st="<<transaction->Stream_input_type<<" -> "<<targetAddress.ChannelID <<"\n"; 
-				 
+
+				//if(transaction->Stream_input_type != 2) - else: 继续执行 按CWDP分配
 			case Flash_Plane_Allocation_Scheme_Type::CWDP:
 				targetAddress.ChannelID = domain->Channel_ids[(unsigned int)(lpn % domain->Channel_no)];
 				targetAddress.ChipID = domain->Chip_ids[(unsigned int)((lpn / domain->Channel_no) % domain->Chip_no)];
@@ -1267,6 +1312,7 @@ namespace SSD_Components
 		AddressMappingDomain* domain = domains[stream_id];
 		switch (domain->PlaneAllocationScheme) {
 			//Static: Channel first
+			case Flash_Plane_Allocation_Scheme_Type::IDEF://read no_ppa, default use CWDP
 			case Flash_Plane_Allocation_Scheme_Type::CWDP:
 				read_address.ChannelID = domain->Channel_ids[(unsigned int)(lpa % domain->Channel_no)];
 				read_address.ChipID = domain->Chip_ids[(unsigned int)((lpa / domain->Channel_no) % domain->Chip_no)];
@@ -1675,6 +1721,11 @@ namespace SSD_Components
 
 	void Address_Mapping_Unit_Page_Level::generate_flash_read_request_for_mapping_data(const stream_id_type stream_id, const LPA_type lpn)
 	{
+		if(std::getenv("ACCEL_HBF_STREAM_DEBUG")) {
+			fprintf(stdout,
+					"AMU_TRACE stage=mapping_serviced event=queued_waiting_unmapped_program for_mapping_data lpn=%llu\n",
+									(unsigned long long)lpn);
+			};
 		MVPN_type mvpn = get_MVPN(lpn, stream_id);
 
 		if (mvpn >= domains[stream_id]->Total_translation_pages_no) {
@@ -1705,7 +1756,10 @@ namespace SSD_Components
 			block_manager->Read_transaction_issued(readTR->Address);//Inform block_manager as soon as the transaction's target address is determined
 			readTR->PPA = ppn;
 			ftl->TSU->Submit_transaction(readTR);
-
+			if (std::getenv("ACCEL_HBF_STREAM_DEBUG")) {
+				fprintf(stdout, "[AMU_DEBUG] Mapping Read submitted to TSU: LPA=%llu, Channel=%u\n", 
+						(unsigned long long)lpn, readTR->Address.ChannelID);
+			}
 			Stats::Total_flash_reads_for_mapping++;
 			Stats::Total_flash_reads_for_mapping_per_stream[stream_id]++;
 
@@ -1764,15 +1818,36 @@ namespace SSD_Components
 						it2 = _my_instance->domains[transaction->Stream_id]->Waiting_unmapped_program_transactions.find(lpa);
 						while (it2 != _my_instance->domains[transaction->Stream_id]->Waiting_unmapped_program_transactions.end() &&
 							(*it2).first == lpa) {
+							if (std::getenv("ACCEL_HBF_STREAM_DEBUG") &&
+								it2->second->Source == Transaction_Source_Type::USERIO &&
+								it2->second->Type == Transaction_Type::WRITE) {
+								fprintf(stdout,
+									"AMU_TRACE stage=mapping_serviced event=dequeue_waiting_unmapped_program lpa=%llu\n",
+									(unsigned long long)lpa);
+							}
 							if (_my_instance->is_lpa_locked_for_gc(transaction->Stream_id, lpa)) {
 								_my_instance->manage_user_transaction_facing_barrier(it2->second);
 							} else {
 								if (_my_instance->translate_lpa_to_ppa(transaction->Stream_id, it2->second)) {
+									if (std::getenv("ACCEL_HBF_STREAM_DEBUG") &&
+										it2->second->Source == Transaction_Source_Type::USERIO &&
+										it2->second->Type == Transaction_Type::WRITE) {
+										fprintf(stdout,
+											"AMU_TRACE stage=mapping_serviced event=translate_waiting_unmapped_program_ok lpa=%llu\n",
+											(unsigned long long)lpa);
+									}
 									_my_instance->ftl->TSU->Submit_transaction(it2->second);
 									if (((NVM_Transaction_Flash_WR*)it2->second)->RelatedRead != NULL) {
 										_my_instance->ftl->TSU->Submit_transaction(((NVM_Transaction_Flash_WR*)it2->second)->RelatedRead);
 									}
 								} else {
+									if (std::getenv("ACCEL_HBF_STREAM_DEBUG") &&
+										it2->second->Source == Transaction_Source_Type::USERIO &&
+										it2->second->Type == Transaction_Type::WRITE) {
+										fprintf(stdout,
+											"AMU_TRACE stage=mapping_serviced event=translate_waiting_unmapped_program_fail lpa=%llu\n",
+											(unsigned long long)lpa);
+									}
 									_my_instance->mange_unsuccessful_translation(it2->second);
 								}
 							}

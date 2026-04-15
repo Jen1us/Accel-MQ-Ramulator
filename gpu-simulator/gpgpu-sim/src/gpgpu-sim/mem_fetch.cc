@@ -78,8 +78,10 @@ mem_fetch::mem_fetch(const mem_access_t &access, const warp_inst_t *inst,
   }
   if (m_original_mf && m_original_mf->has_mem_backend()) {
     m_mem_backend = m_original_mf->get_mem_backend();
+    m_stream_type = m_original_mf->get_stream_type();
   } else if (m_original_wr_mf && m_original_wr_mf->has_mem_backend()) {
     m_mem_backend = m_original_wr_mf->get_mem_backend();
+    m_stream_type = m_original_wr_mf->get_stream_type();
   } else if (config) {
     config->assign_mem_backend(this);
   }

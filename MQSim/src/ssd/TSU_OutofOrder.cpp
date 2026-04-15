@@ -312,6 +312,7 @@ bool TSU_OutOfOrder::service_read_transaction(NVM::FlashMemory::Flash_Chip *chip
 			return false;
 		}
 		suspensionRequired = true;
+		break;
 	case ChipStatus::ERASING:
 		if (!eraseSuspensionEnabled || _NVMController->HasSuspendedCommand(chip))
 		{
@@ -322,6 +323,7 @@ bool TSU_OutOfOrder::service_read_transaction(NVM::FlashMemory::Flash_Chip *chip
 			return false;
 		}
 		suspensionRequired = true;
+		break;
 	default:
 		return false;
 	}

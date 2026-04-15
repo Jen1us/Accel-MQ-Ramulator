@@ -51,7 +51,8 @@ struct mqsim_backend::shared_state_t {
   using create_f = void *(*)(const char *);
   using create2_f = void *(*)(const char *, const mq_create_params_t *);
   using destroy_f = void (*)(void *);
-  using send_f = int (*)(void *, uint32_t, uint64_t, uint32_t, int, int, void *);
+  using send_f =        //  int1 int2 int3->flag for slc or mlc
+      int (*)(void *, uint32_t, uint64_t, uint32_t, int, int, int, void *);
   using tick_to_f = void (*)(void *, uint64_t);
   using poll_f = int (*)(void *, mq_completion_t *);
 
@@ -261,9 +262,10 @@ void mqsim_backend::push(mem_fetch *data) {
                                   : (uint32_t)data->get_data_size();
   const int is_write = data->is_write() ? 1 : 0;
   const int source_id = (int)data->get_sid();
+  const int stream_type = data->get_stream_type();
 
   int ok = st.send(st.h, part_id, part_addr, size_bytes, is_write, source_id,
-                   data);
+                   stream_type, data);
   if (!ok) {
     fprintf(stderr, "MQSim backend: mq_send failed (pending queue full?)\n");
     assert(0);

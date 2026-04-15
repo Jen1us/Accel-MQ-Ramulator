@@ -603,23 +603,43 @@ void memory_config::load_mem_backend_map() {
   }
 }
 
-unsigned memory_config::resolve_mem_backend(new_addr_type addr) const {
-  if (!has_mem_backend_map()) return EXTMEM_BACKEND_UNSPECIFIED;
+unsigned memory_config::resolve_mem_backend(new_addr_type addr) const { //根据物理地址查找对应的内存后端类型
+  if (!has_mem_backend_map()) return EXTMEM_BACKEND_UNSPECIFIED;  //是否存在内存后端映射表
 
-  for (size_t i = 0; i < m_mem_backend_ranges.size(); ++i) {
+  for (size_t i = 0; i < m_mem_backend_ranges.size(); ++i) {  //遍历所有的内存范围配置
     const mem_backend_range &range = m_mem_backend_ranges[i];
-    if (addr >= range.base && addr < range.end) return range.backend;
+    if (addr >= range.base && addr < range.end) return range.backend; //检查给定地址是否落在某个范围内
   }
 
   return mem_backend_default;
+}
+
+std::string memory_config::resolve_mem_backend_label(new_addr_type addr) const {
+  if (!has_mem_backend_map()) return "";
+
+  for (size_t i = 0; i < m_mem_backend_ranges.size(); ++i) {
+    const mem_backend_range &range = m_mem_backend_ranges[i];
+    if (addr >= range.base && addr < range.end) return range.label;
+  }
+
+  return "";
 }
 
 void memory_config::assign_mem_backend(mem_fetch *mf) const {
   if (!mf || mf->has_mem_backend()) return;
 
   unsigned backend = EXTMEM_BACKEND_UNSPECIFIED;
+  int stream_type = 0;
   if (has_mem_backend_map()) {
     backend = resolve_mem_backend(mf->get_addr());
+    std::string normalized_label = resolve_mem_backend_label(mf->get_addr());
+    std::transform(normalized_label.begin(), normalized_label.end(),
+                   normalized_label.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    if (normalized_label == "mlc")
+      stream_type = 1;
+    else if (normalized_label == "slc")
+      stream_type = 0;
   } else {
     unsigned partition_id = 0;
     if (!is_SST_mode()) partition_id = mf->get_tlx_addr().chip;
@@ -629,7 +649,16 @@ void memory_config::assign_mem_backend(mem_fetch *mf) const {
                   : EXTMEM_BACKEND_RAMULATOR;
   }
 
+  mf->set_stream_type(stream_type);
   mf->set_mem_backend(static_cast<mem_fetch::mem_backend_t>(backend));
+
+  // Optional debug trace for stream-type tagging path.
+  if (std::getenv("ACCEL_HBF_STREAM_DEBUG")) {
+    fprintf(stdout,
+            "HBF_STREAM_TAG uid=%u addr=0x%llx backend=%u stream_type=%d\n",
+            mf->get_request_uid(), (unsigned long long)mf->get_addr(), backend,
+            stream_type);
+  }
 }
 
 void memory_config::require_valid_mem_backend(const mem_fetch *mf,

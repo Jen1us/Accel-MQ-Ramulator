@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdlib>
 #include <deque>
 #include <fstream>
 #include <string>
@@ -12,7 +13,7 @@
 #include "nvm_chip/flash_memory/Flash_Chip.h"
 #include "nvm_chip/flash_memory/Physical_Page_Address.h"
 #include "sim/Engine.h"
-#include "ssd/SSD_Device.h"
+#include "exec/SSD_Device.h"
 #include "ssd/Address_Mapping_Unit_Page_Level.h"
 #include "ssd/Data_Cache_Manager_Flash_Simple.h"
 #include "ssd/FTL.h"
@@ -54,8 +55,6 @@ struct mq_create_params_t {
 };
 
 namespace {
-class SSD_Device;
-
 struct mq_completion_t {
   void* user_ptr;
   uint64_t finish_time_ns;
@@ -67,7 +66,7 @@ struct mq_pending_req_t {
   uint32_t size_bytes;
   int is_write;
   int source_id;
-  int HBF_Stream_input_type;  //0 means default, 1 -> SLC, 2 -> MLC;
+  int HBF_Stream_input_type;  //0 means SLC, 1-> MLC;if 2 means default, 
   void* user_ptr;
 };
 
@@ -346,11 +345,39 @@ static bool parse_mqsim_xml(const char* xml_path) {
       if (sets_node) {
           // 清空旧数据，防止重复运行导致 map 堆积
           Flash_Parameter_Set::Flash_Parameter_Sets.clear();
-          // 调用写好的解析函数：它会遍历 sets_node 下的所有 <Flash_Parameter_Set>
-          Flash_Parameter_Set::XML_deserialize(sets_node); 
+          Flash_Parameter_Set flash_params;
+          flash_params.XML_deserialize(sets_node);
       } else {
           std::cout << "Warning: Could not find <Flash_Parameter_Sets> node! Attempting single node fallback." << std::endl;
-          // 如果 XML 还是老格式，这里可以加一个逻辑去读单个 Flash_Parameter_Set
+          rapidxml::xml_node<>* single_set = device_node->first_node("Flash_Parameter_Set");
+          if (single_set) {
+              Flash_Parameter_Set::Flash_Parameter_Sets.clear();
+              Flash_Parameter_Set flash_params;
+              flash_params.XML_deserialize_single(single_set);
+
+              Flash_Parameter_Set::Flash_Params params;
+              params.Flash_Technology = Flash_Parameter_Set::Flash_Technology;
+              params.CMD_Suspension_Support = Flash_Parameter_Set::CMD_Suspension_Support;
+              params.Page_Read_Latency_LSB = Flash_Parameter_Set::Page_Read_Latency_LSB;
+              params.Page_Read_Latency_CSB = Flash_Parameter_Set::Page_Read_Latency_CSB;
+              params.Page_Read_Latency_MSB = Flash_Parameter_Set::Page_Read_Latency_MSB;
+              params.Page_Program_Latency_LSB = Flash_Parameter_Set::Page_Program_Latency_LSB;
+              params.Page_Program_Latency_CSB = Flash_Parameter_Set::Page_Program_Latency_CSB;
+              params.Page_Program_Latency_MSB = Flash_Parameter_Set::Page_Program_Latency_MSB;
+              params.Block_Erase_Latency = Flash_Parameter_Set::Block_Erase_Latency;
+              params.Block_PE_Cycles_Limit = Flash_Parameter_Set::Block_PE_Cycles_Limit;
+              params.Suspend_Erase_Time = Flash_Parameter_Set::Suspend_Erase_Time;
+              params.Suspend_Program_Time = Flash_Parameter_Set::Suspend_Program_Time;
+              params.Die_No_Per_Chip = Flash_Parameter_Set::Die_No_Per_Chip;
+              params.Plane_No_Per_Die = Flash_Parameter_Set::Plane_No_Per_Die;
+              params.Block_No_Per_Plane = Flash_Parameter_Set::Block_No_Per_Plane;
+              params.Page_No_Per_Block = Flash_Parameter_Set::Page_No_Per_Block;
+              params.Page_Capacity = Flash_Parameter_Set::Page_Capacity;
+              params.Page_Metadat_Capacity = Flash_Parameter_Set::Page_Metadat_Capacity;
+
+              Flash_Parameter_Set::Flash_Parameter_Sets[params.Flash_Technology] = params;
+              Flash_Parameter_Set::select_configuration(params.Flash_Technology);
+          }
       }
   }
   
@@ -375,10 +402,14 @@ static mq_handle_t* build_handle_from_config(const char* xml_path) {
   gpu_flow->Die_No = p->Flash_Parameters.Die_No_Per_Chip;
   gpu_flow->Plane_No = p->Flash_Parameters.Plane_No_Per_Die;
   // ... 将所有 ID 填入 (0, 1, 2...) ...
-  for(int i=0; i<gpu_flow->Channel_No; i++) gpu_flow->Channel_IDs.push_back(i);
-  for(int i=0; i<gpu_flow->Chip_No; i++) gpu_flow->Chip_IDs.push_back(i);
-  for(int i=0; i<gpu_flow->Die_No; i++) gpu_flow->Die_IDs.push_back(i);
-  for(int i=0; i<gpu_flow->Plane_No; i++) gpu_flow->Plane_IDs.push_back(i);
+  gpu_flow->Channel_IDs = new flash_channel_ID_type[gpu_flow->Channel_No];
+  gpu_flow->Chip_IDs = new flash_chip_ID_type[gpu_flow->Chip_No];
+  gpu_flow->Die_IDs = new flash_die_ID_type[gpu_flow->Die_No];
+  gpu_flow->Plane_IDs = new flash_plane_ID_type[gpu_flow->Plane_No];
+  for (int i = 0; i < gpu_flow->Channel_No; i++) gpu_flow->Channel_IDs[i] = i;
+  for (int i = 0; i < gpu_flow->Chip_No; i++) gpu_flow->Chip_IDs[i] = i;
+  for (int i = 0; i < gpu_flow->Die_No; i++) gpu_flow->Die_IDs[i] = i;
+  for (int i = 0; i < gpu_flow->Plane_No; i++) gpu_flow->Plane_IDs[i] = i;
   
   dummy_flows.push_back(gpu_flow);
 
@@ -474,11 +505,12 @@ void* mq_create2(const char* mqsim_xml_config_path,
   // Override link timing directly at the channel level (NVDDR2 two-unit
   // transfer times). We patch the per-channel fields after construction.
   // This avoids depending on MQSim's Channel_Transfer_Rate convention.
-  for (auto* ch : h->channels) {
-    if (!ch) continue;
-    if (params->two_unit_data_in_time) ch->TwoUnitDataInTime = params->two_unit_data_in_time;
-    if (params->two_unit_data_out_time) ch->TwoUnitDataOutTime = params->two_unit_data_out_time;
-  }
+  // for (auto* ch : h->channels) {
+  //   if (!ch) continue;
+  //   if (params->two_unit_data_in_time) ch->TwoUnitDataInTime = params->two_unit_data_in_time;
+  //   if (params->two_unit_data_out_time) ch->TwoUnitDataOutTime = params->two_unit_data_out_time;
+  // }
+  //Link timing overrides are applied through device parameters above.
 
   g_handle = h;
 
@@ -516,6 +548,12 @@ int mq_send(void* handle, uint32_t part_id, uint64_t part_addr,
   auto* h = static_cast<mq_handle_t*>(handle);
   if (!h) return 0;
   if (h->pending.size() >= h->max_pending) return 0;
+  if (std::getenv("ACCEL_HBF_STREAM_DEBUG")) {
+    fprintf(stdout,
+            "MQ_SEND part=%u addr=0x%llx size=%u wr=%d sid=%d stream_type=%d\n",
+            part_id, (unsigned long long)part_addr, size_bytes, is_write,
+            source_id, HBF_Stream_input_type);
+  }
   h->pending.push_back(
       {part_id, part_addr, size_bytes, is_write, source_id, HBF_Stream_input_type, user_ptr});
   return 1;
@@ -573,6 +611,12 @@ void mq_tick_to(void* handle, uint64_t time_ns) {
         
         // 注入你制定的 SLC/MLC 标记！
         tr->Stream_input_type = (uint16_t)preq.HBF_Stream_input_type;
+        if (std::getenv("ACCEL_HBF_STREAM_DEBUG")) {
+          fprintf(stdout,
+                  "MQ_TX WR lpa=%llu stream_type=%u size=%u\n",
+                  (unsigned long long)lpa,
+                  (unsigned)tr->Stream_input_type, preq.size_bytes);
+        }
         transaction_list.push_back(tr);
 
         // 提前向 GPU 返回 ACK (Posted Write)，避免流水线堵死
@@ -619,11 +663,21 @@ void mq_tick_to(void* handle, uint64_t time_ns) {
     //   txs.push_back(tr);
     //   h->amu->Translate_lpa_to_ppa_and_dispatch(txs);
     else {
+      auto* ur = new SSD_Components::User_Request();
+      ur->IO_command_info = preq.user_ptr;
+      //对于 Read 请求，依赖 MQSim 模拟完读取延迟后，回调 tx_serviced_cb 函数来通知 GPU
+
+
       auto* tr = new SSD_Components::NVM_Transaction_Flash_RD(
           SSD_Components::Transaction_Source_Type::USERIO, 
-          0, preq.size_bytes, lpa, NO_PPA, nullptr, 0, nullptr, bitmap, Simulator->Time()
+          0, preq.size_bytes, lpa, NO_PPA, ur, 0, nullptr, bitmap, Simulator->Time()
       );
       tr->Stream_input_type = (uint16_t)preq.HBF_Stream_input_type;
+      if (std::getenv("ACCEL_HBF_STREAM_DEBUG")) {
+        fprintf(stdout, "MQ_TX RD lpa=%llu stream_type=%u size=%u\n",
+                (unsigned long long)lpa, (unsigned)tr->Stream_input_type,
+                preq.size_bytes);
+      }
       transaction_list.push_back(tr);
     }
 
@@ -632,14 +686,14 @@ void mq_tick_to(void* handle, uint64_t time_ns) {
     //   // will be reflected in later internal contention (die/plane busy), but
     //   // it does not block the GPU pipeline.
     //   h->completions.push_back({preq.user_ptr, Simulator->Time()});
-    }
   }
   h->pending.clear();
 
   // 将请求直接丢给完整的 AMU 进行映射和下发
   amu->Translate_lpa_to_ppa_and_dispatch(transaction_list);// 唤醒 FTL 下面的调度器
-  ftl->TSU->Schedule();
-
+  //ftl->TSU->Schedule();
+  //Address_Mapping_Unit_Page_Level::Translate_lpa_to_ppa_and_dispatch() 内部本来就会Prepare_for_transaction_submit() + Schedule()
+  //此处 mqsim_wrap.cpp 里在调用完 AMU 后额外 ftl->TSU->Schedule() 一次
   // Some components may schedule immediate events at the current time.
   Simulator->Run_until(time_ns);
 }
