@@ -52,3 +52,40 @@ source /accel-sim/gpu-simulator/setup_environment.sh
   temporary compatibility path (opcode mapping to Ampere + unknown opcodes fall
   back to NOP). Accuracy will be improved when full SM89 opcode/config support
   is added.
+
+## Tiny transformer backend-map validation
+
+Use the dedicated tiny transformer backend-map flow when you want to validate
+semantic VA routing instead of random HBF/HBM tagging:
+
+```bash
+bash workloads/flashattention_v2/run_end2end_backend_map.sh
+```
+
+This flow:
+
+- builds a tiny decoder-block CUDA app with explicit weight and `kv_cache`
+  allocations,
+- exports actual traced VAs to `backend_meta.tsv`,
+- generates `backend_map.txt`,
+- checks that an incomplete map fails fast,
+- runs Accel-Sim with the complete map and emits `hbf_requests.trace`,
+- annotates the request trace into `hbf_requests_annotated.csv` with
+  `region`, `layer`, and `source_hint`.
+
+The semantic regions are:
+
+- `weights_q`
+- `weights_k`
+- `weights_v`
+- `weights_o`
+- `weights_mlp_up`
+- `weights_mlp_gate`
+- `weights_mlp_down`
+- `kv_cache`
+
+All weight regions are expected to route to `MQSIM`. `kv_cache` reads and
+writes are expected to route to `RAMULATOR`. No activation/scratch/output
+buffer is assigned a backend in this validation path.
+
+Outputs land under `hw_run/traces_jenius/tiny_transformer_backend_map/`.
