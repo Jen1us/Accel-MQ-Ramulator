@@ -1,0 +1,2 @@
+# Intentionally leaves the minimal driver address range unmapped.
+0x80000000 0x1000 ramulator irrelevant_far_range
