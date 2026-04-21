@@ -1,0 +1,48 @@
+------------- NVBit (NVidia Binary Instrumentation Tool v1.7.6) Loaded --------------
+NVBit core environment variables (mostly for nvbit-devs):
+ACK_CTX_INIT_LIMITATION = 0 - if set, no warning will be printed for nvbit_at_ctx_init()
+            NVDISASM = nvdisasm - override default nvdisasm found in PATH
+            NOBANNER = 0 - if set, does not print this banner
+       NO_EAGER_LOAD = 0 - eager module loading is turned on by NVBit to prevent potential NVBit tool deadlock, turn it off if you want to use the lazy module loading feature
+---------------------------------------------------------------------------------
+         INSTR_BEGIN = 0 - Beginning of the instruction interval where to apply instrumentation
+           INSTR_END = 4294967295 - End of the instruction interval where to apply instrumentation
+    EXCLUDE_PRED_OFF = 1 - Exclude predicated off instruction from count
+      TRACE_LINEINFO = 0 - Include source code line info at the start of each traced line. The target binary must be compiled with -lineinfo or --generate-line-info
+DYNAMIC_KERNEL_RANGE =  - Specify kernel IDs or ranges to trace. Format:
+  - Single ID:       "2" traces only kernel 2.
+  - Range:           "5-8" traces kernels 5 through 8 (inclusive).
+  - Open-ended:      "10-" traces from kernel 10 onward.
+  - Multiple ranges: "2 5-8 10-" (space-separated).
+  - With regex:      "5-8@kernel_a.*,kernel_b.*" traces kernels 5–8 with matching names.
+If unset or empty, all kernels will be traced from the beginning.
+   ACTIVE_FROM_START = 0 - Start instruction tracing from start or wait for cuProfilerStart and cuProfilerStop. If set to 0, DYNAMIC_KERNEL_RANGE options have no effect
+        TOOL_VERBOSE = 0 - Enable verbosity inside the tool
+       TOOL_COMPRESS = 1 - Enable traces compression
+     TOOL_TRACE_CORE = 0 - write the core id in the traces
+TERMINATE_UPON_LIMIT = 0 - Stop the process once the current kernel > DYNAMIC_KERNEL_LIMIT_END
+USER_DEFINED_FOLDERS = 0 - Uses the user defined folder TRACES_FOLDER path environment
+    TRACE_ADDR_REMAP = 0 - Enable global memory address remapping in the traces
+    TRACE_ADDR_SCALE = 1 - Global memory address scale factor (integer)
+TRACE_ADDR_ALIGN_BYTES = 128 - Alignment for virtual allocations (bytes)
+TRACE_ADDR_VIRT_BASE =  - Optional base address for remapped global addresses (hex)
+ TRACE_FILE_COMPRESS = 1 - Create xz-compressed tracefile
+ENABLE_SPINLOCK_FAST_FORWARD = 0 - Enable spinlock fast forwarding
+SPINLOCK_ITER_TO_KEEP = 1 - Number of iterations to keep for spinlock fast forwarding
+WARNING: Do not call CUDA memory allocation in nvbit_at_ctx_init(). It will cause deadlocks. Do them in nvbit_tool_init(). If you encounter deadlocks, remove CUDA API calls to debug.
+----------------------------------------------------------------------------------------------------
+=== Tiny Decoder Block Backend-Map Driver ===
+HEAD_DIM=32 HEADS_NUM=2 LAYERS_NUM=1
+HIDDEN_DIM=64 MLP_HIDDEN_DIM=128
+LOGICAL_SEQ_LEN=16 PHYSICAL_RING_LEN=16
+PROJ_TAPS=1 MLP_TAPS=1 ATTN_WINDOW=4
+GEN_LEN=1
+backend_meta=/home/jenius/Accel-MQ-Ramulator-publish-20260321-v2/hw_run/traces_jenius/tiny_transformer_backend_map/backend_meta.tsv
+Warning: Ignoring CALL.REL.NOINC (NVBit 1.7.4 bug)
+Warning: Ignoring CALL.REL.NOINC (NVBit 1.7.4 bug)
+Warning: Ignoring CALL.REL.NOINC (NVBit 1.7.4 bug)
+Warning: Ignoring CALL.REL.NOINC (NVBit 1.7.4 bug)
+Warning: Ignoring CALL.REL.NOINC (NVBit 1.7.4 bug)
+Warning: Ignoring CALL.REL.NOINC (NVBit 1.7.4 bug)
+Writing results to /home/jenius/Accel-MQ-Ramulator-publish-20260321-v2/hw_run/traces_jenius/tiny_transformer_backend_map/traces//kernel-1-ctx_0x55ddb0567af0.trace.xz
+Done.
